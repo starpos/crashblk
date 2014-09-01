@@ -28,7 +28,9 @@ EXTRA_CFLAGS += -I$(obj)/../include/ -I$(obj)
 ifneq ($(KERNELRELEASE),)
 # call from kernel build system
 
-obj-m := bdevt.o
+bdevt-mod-objs := treemap.o bdevt.o
+
+obj-m := bdevt-mod.o
 
 else
 
