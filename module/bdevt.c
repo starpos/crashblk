@@ -634,11 +634,15 @@ static void exit_bdevt_dev(struct bdevt_dev *mdev)
  */
 static void del_dev(struct bdevt_dev *mdev)
 {
+	const u32 minor = mdev->index;
+
 	del_gendisk(mdev->disk);
 	blk_cleanup_queue(mdev->q);
 	put_disk(mdev->disk);
 	exit_bdevt_dev(mdev);
 	kfree(mdev);
+
+	LOGi("deleted bdevt%u\n", minor);
 }
 
 static bool add_dev(u64 size_lb, u32 *minorp)
@@ -698,6 +702,8 @@ static bool add_dev(u64 size_lb, u32 *minorp)
 
 	if (minorp)
 		*minorp = mdev->index;
+
+	LOGi("added bdevt%u\n", mdev->index);
 
 	return true;
 
