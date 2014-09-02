@@ -93,7 +93,7 @@ void invokeIoctl(const std::string &path, struct bdevt_ctl &ctl)
 void doCreate(const StrVec &params)
 {
     if (params.empty()) throw std::runtime_error("specify size.");
-    const uint64_t sizeLb = parseSize(params[0]);
+    const uint64_t sizeLb = parseSize(params[0]) >> 9;
 
     struct bdevt_ctl ctl = {
         .command = BDEVT_IOCTL_START_DEV,
