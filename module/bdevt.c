@@ -471,7 +471,7 @@ static int dispatch_dev_ioctl(struct bdevt_dev *mdev, struct bdevt_ctl *ctl)
 		{BDEVT_IOCTL_RECOVER_ERROR, ioctl_recover_error},
 	};
 
-	for (i = 0; i < sizeof(tbl); i++) {
+	for (i = 0; i < sizeof(tbl) / sizeof(tbl[0]); i++) {
 		if (ctl->command == tbl[i].id)
 			return tbl[i].handler(mdev, ctl);
 	}
