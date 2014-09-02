@@ -85,71 +85,71 @@ static inline u64 block_to_sector(u64 blks)
 
 static struct page_block *alloc_page_block(gfp_t gfp_mask)
 {
-	struct page_block *blk;
+	struct page_block *pblk;
 
-	blk = kmalloc(sizeof(*blk), gfp_mask);
-	if (!blk)
+	pblk = kmalloc(sizeof(*pblk), gfp_mask);
+	if (!pblk)
 		goto error0;
 
-	blk->page = alloc_page(gfp_mask | __GFP_ZERO);
-	if (!blk->page)
+	pblk->page = alloc_page(gfp_mask | __GFP_ZERO);
+	if (!pblk->page)
 		goto error1;
 
-	atomic_set(&blk->cnt, 1);
-	return blk;
+	atomic_set(&pblk->cnt, 1);
+	return pblk;
 #if 0
 error2:
-	__free_page(blk->page);
+	__free_page(pblk->page);
 #endif
 error1:
-	kfree(blk);
+	kfree(pblk);
 error0:
 	return NULL;
 }
 
-static void get_page_block(struct page_block *blk)
+static void get_page_block(struct page_block *pblk)
 {
-	atomic_inc(&blk->cnt);
+	atomic_inc(&pblk->cnt);
 }
 
-static void put_page_block(struct page_block *blk)
+static void put_page_block(struct page_block *pblk)
 {
-	if (atomic_dec_and_test(&blk->cnt)) {
-		__free_page(blk->page);
-		kfree(blk);
+	if (atomic_dec_and_test(&pblk->cnt)) {
+		__free_page(pblk->page);
+		kfree(pblk);
 	}
 }
 
 static struct page_block *alloc_page_block_retry_forever(gfp_t gfp_mask)
 {
-	struct page_block *blk;
+	struct page_block *pblk;
 
-	blk = alloc_page_block(GFP_KERNEL);
-	while (!blk) {
+	pblk = alloc_page_block(GFP_KERNEL);
+	while (!pblk) {
 		schedule();
-		blk = alloc_page_block(GFP_KERNEL);
+		pblk = alloc_page_block(GFP_KERNEL);
 	}
-	return blk;
+	return pblk;
 }
 
 static struct page_block *try_add_page_block_to_mdev(
 	struct bdevt_dev *mdev, u64 blks, bool is_cache)
 {
 	struct map *map = is_cache ? mdev->map0 : mdev->map1;
-	struct page_block *blk = alloc_page_block_retry_forever(GFP_NOIO);
+	struct page_block *pblk = alloc_page_block_retry_forever(GFP_NOIO);
 	int ret;
 
 retry:
-	ret = map_add(map, blks, (unsigned long)blk, GFP_NOIO);
+	ret = map_add(map, blks, (unsigned long)pblk, GFP_NOIO);
 	if (ret == 0) {
 		/* Do nothing */
 	} else if (ret == -EEXIST) {
-		put_page_block(blk);
-		blk = (struct page_block *)map_lookup(map, blks);
+		put_page_block(pblk);
+		pblk = (struct page_block *)map_lookup(map, blks);
 	} else {
 		goto retry;
 	}
-	return blk;
+	return pblk;
 }
 
 static void copy_page_block(struct page_block *dst, struct page_block *src)
@@ -166,69 +166,69 @@ static void copy_page_block(struct page_block *dst, struct page_block *src)
 static struct page_block *get_page_block_for_write(struct bdevt_dev *mdev, u64 blks)
 {
 	struct map_cursor curt0, curt1;
-	struct page_block *blk0 = NULL, *blk1 = NULL;
+	struct page_block *pblk0 = NULL, *pblk1 = NULL;
 
 	mutex_lock(&mdev->map_lock);
 
 	map_cursor_init(mdev->map0, &curt0);
 	map_cursor_init(mdev->map1, &curt1);
 	if (map_cursor_search(&curt0, blks, MAP_SEARCH_EQ)) {
-		blk0 = (struct page_block *)map_cursor_val(&curt0);
+		pblk0 = (struct page_block *)map_cursor_val(&curt0);
 	} else {
 		if (map_cursor_search(&curt1, blks, MAP_SEARCH_EQ))
-			blk1 = (struct page_block *)map_cursor_val(&curt1);
+			pblk1 = (struct page_block *)map_cursor_val(&curt1);
 	}
 
-	if (blk0) {
+	if (pblk0) {
 		/* Do nothing */
-	} else if (blk1) {
-		blk0 = try_add_page_block_to_mdev(mdev, blks, true);
-		copy_page_block(blk0, blk1);
+	} else if (pblk1) {
+		pblk0 = try_add_page_block_to_mdev(mdev, blks, true);
+		copy_page_block(pblk0, pblk1);
 	} else {
-		ASSERT(!blk0);
-		blk1 = try_add_page_block_to_mdev(mdev, blks, false);
-		blk0 = try_add_page_block_to_mdev(mdev, blks, true);
+		ASSERT(!pblk0);
+		pblk1 = try_add_page_block_to_mdev(mdev, blks, false);
+		pblk0 = try_add_page_block_to_mdev(mdev, blks, true);
 	}
-	get_page_block(blk0);
+	get_page_block(pblk0);
 	mutex_unlock(&mdev->map_lock);
-	return blk0;
+	return pblk0;
 }
 
 static struct page_block *get_page_block_for_read(struct bdevt_dev *mdev, u64 blks)
 {
 	struct map_cursor curt0, curt1;
-	struct page_block *blk0 = NULL, *blk1 = NULL;
+	struct page_block *pblk0 = NULL, *pblk1 = NULL;
 
 	mutex_lock(&mdev->map_lock);
 
 	map_cursor_init(mdev->map0, &curt0);
 	map_cursor_init(mdev->map1, &curt1);
 	if (map_cursor_search(&curt0, blks, MAP_SEARCH_EQ)) {
-		blk0 = (struct page_block *)map_cursor_val(&curt0);
+		pblk0 = (struct page_block *)map_cursor_val(&curt0);
 	} else {
 		if (map_cursor_search(&curt1, blks, MAP_SEARCH_EQ))
-			blk1 = (struct page_block *)map_cursor_val(&curt1);
+			pblk1 = (struct page_block *)map_cursor_val(&curt1);
 	}
 
-	if (blk0) {
-		get_page_block(blk0);
+	if (pblk0) {
+		get_page_block(pblk0);
 		mutex_unlock(&mdev->map_lock);
-		return blk0;
+		return pblk0;
 	}
-	if (blk1) {
-		get_page_block(blk1);
+	if (pblk1) {
+		get_page_block(pblk1);
 		mutex_unlock(&mdev->map_lock);
-		return blk1;
+		return pblk1;
 	}
-	blk1 = try_add_page_block_to_mdev(mdev, blks, false);
-	get_page_block(blk1);
+	pblk1 = try_add_page_block_to_mdev(mdev, blks, false);
+	get_page_block(pblk1);
 	mutex_unlock(&mdev->map_lock);
-	return blk1;
+	return pblk1;
 }
 
 static void write_bio(struct bdevt_dev *mdev, struct bio *bio)
 {
-	struct page_block *blk;
+	struct page_block *pblk;
 	u64 blks;
 	u32 dst_off, src_off;
 	u8 *src_buf, *dst_buf;
@@ -238,22 +238,22 @@ static void write_bio(struct bdevt_dev *mdev, struct bio *bio)
 		dst_off = do_div(blks, PAGE_SIZE >> 9) * LBS;
 		src_off = bio_offset(bio);
 
-		blk = get_page_block_for_write(mdev, blks);
+		pblk = get_page_block_for_write(mdev, blks);
 
-		dst_buf = kmap_atomic(blk->page);
+		dst_buf = kmap_atomic(pblk->page);
 		src_buf = kmap_atomic(bio_page(bio));
 		memcpy(dst_buf + dst_off, src_buf + src_off, LBS);
 		kunmap_atomic(dst_buf);
 		kunmap_atomic(src_buf);
 
-		put_page_block(blk);
+		put_page_block(pblk);
 		bio_advance(bio, LBS);
 	}
 }
 
 static void read_bio(struct bdevt_dev *mdev, struct bio *bio)
 {
-	struct page_block *blk;
+	struct page_block *pblk;
 	u64 blks;
 	u32 src_off, dst_off;
 	u8 *src_buf, *dst_buf;
@@ -263,29 +263,29 @@ static void read_bio(struct bdevt_dev *mdev, struct bio *bio)
 		src_off = do_div(blks, PAGE_SIZE >> 9) * LBS;
 		dst_off = bio_offset(bio);
 
-		blk = get_page_block_for_read(mdev, blks);
+		pblk = get_page_block_for_read(mdev, blks);
 
-		src_buf = kmap_atomic(blk->page);
+		src_buf = kmap_atomic(pblk->page);
 		dst_buf = kmap_atomic(bio_page(bio));
 		memcpy(dst_buf + dst_off, src_buf + src_off, LBS);
 		kunmap_atomic(dst_buf);
 		kunmap_atomic(src_buf);
 
-		put_page_block(blk);
+		put_page_block(pblk);
 		bio_advance(bio, LBS);
 	}
 }
 
-static bool flush_bdevt_dev_partial(struct bdevt_dev *mdev, size_t nr_blk)
+static bool flush_bdevt_dev_partial(struct bdevt_dev *mdev, u32 nr_blks)
 {
-	size_t i;
+	u32 i;
 	bool ret = true;
 
 	mutex_lock(&mdev->map_lock);
-	for (i = 0; i < nr_blk; i++) {
+	for (i = 0; i < nr_blks; i++) {
 		struct map_cursor curt0, curt1;
 		u64 blks;
-		struct page_block *blk0, *blk1;
+		struct page_block *pblk0, *pblk1;
 
 		if (map_is_empty(mdev->map0)) {
 			ret = false;
@@ -298,16 +298,16 @@ static bool flush_bdevt_dev_partial(struct bdevt_dev *mdev, size_t nr_blk)
 		ASSERT(map_cursor_is_valid(&curt0));
 
 		blks = map_cursor_key(&curt0);
-		blk0 = (struct page_block *)map_cursor_val(&curt0);
+		pblk0 = (struct page_block *)map_cursor_val(&curt0);
 		map_cursor_del(&curt0);
 
 		map_cursor_init(mdev->map1, &curt1);
 		map_cursor_search(&curt1, blks, MAP_SEARCH_EQ);
 		ASSERT(map_cursor_is_valid(&curt1));
-		blk1 = (struct page_block *)map_cursor_val(&curt1);
+		pblk1 = (struct page_block *)map_cursor_val(&curt1);
 
-		copy_page_block(blk1, blk0);
-		put_page_block(blk0);
+		copy_page_block(pblk1, pblk0);
+		put_page_block(pblk0);
 	}
 	mutex_unlock(&mdev->map_lock);
 	return ret;
