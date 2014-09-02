@@ -25,16 +25,16 @@ const char * const ctlPath = "/dev/bdevt_ctl";
 template <typename T>
 void unused(T &) {}
 
-class Exp : public std::exception
+class Exception : public std::exception
 {
     std::string s_;
 public:
-    Exp(const std::string &s) : s_(s) {}
+    Exception(const std::string &s) : s_(s) {}
     const char *what() const noexcept {
         return s_.c_str();
     }
     template <typename T>
-    Exp& operator<<(T&& t) {
+    Exception& operator<<(T&& t) {
         std::stringstream ss;
         ss << ":" << std::forward<T>(t);
         s_ += ss.str();
@@ -44,7 +44,7 @@ public:
 
 uint64_t parseSize(const std::string &s)
 {
-    if (s.empty()) throw Exp("bad size") << s;
+    if (s.empty()) throw Exception("bad size") << s;
     char *end;
     uint64_t val = ::strtoul(s.data(), &end, 10);
     switch (*end) {
@@ -65,16 +65,17 @@ class File
     } catch (...) {
     }
     int fd() const {
-        if (fd_ < 0) throw std::runtime_error("bad fd");
+        if (fd_ < 0) throw Exception("bad fd");
         return fd_;
     }
     void open(const std::string &path) {
+        if (fd_ >= 0) close();
         fd_ = ::open(path.c_str(), O_RDWR);
-        if (fd_ < 0) throw Exp("open failed") << path;
+        if (fd_ < 0) throw Exception("open failed") << path;
     }
     void close() {
-        if (fd_ > 0) {
-            if (::close(fd_) != 0) throw Exp("close failed") << fd_;
+        if (fd_ >= 0) {
+            if (::close(fd_) != 0) throw Exception("close failed") << fd_;
             fd_ = -1;
         }
     }
@@ -85,14 +86,14 @@ void invokeIoctl(const std::string &path, struct bdevt_ctl &ctl)
     File file;
     file.open(path);
     if (::ioctl(file.fd(), BDEVT_IOCTL, &ctl) < 0) {
-        throw std::runtime_error("ioctl failed.");
+        throw Exception("ioctl failed.");
     }
     file.close();
 }
 
 void doCreate(const StrVec &params)
 {
-    if (params.empty()) throw std::runtime_error("specify size.");
+    if (params.empty()) throw Exception("specify size.");
     const uint64_t sizeLb = parseSize(params[0]) >> 9;
 
     struct bdevt_ctl ctl = {
@@ -105,7 +106,7 @@ void doCreate(const StrVec &params)
 
 void doDelete(const StrVec &params)
 {
-    if (params.empty()) throw std::runtime_error("specify device.");
+    if (params.empty()) throw Exception("specify device.");
     const std::string &devPath = params[0];
 
     struct bdevt_ctl ctl = {
@@ -115,7 +116,7 @@ void doDelete(const StrVec &params)
 }
 
 #define NYI(func) \
-    throw Exp("not yet implemented") << func
+    throw Exception("not yet implemented") << func
 
 void doNumDev(const StrVec &params)
 {
@@ -190,7 +191,7 @@ void dispatch(int argc, char *argv[])
             return;
         }
     }
-    throw Exp("command not found") << cmd;
+    throw Exception("command not found") << cmd;
 }
 
 int main(int argc, char *argv[]) try
