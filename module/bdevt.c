@@ -52,8 +52,8 @@ struct page_block
 
 static int major_;
 
-static LIST_HEAD(dev_list_);
-static struct mutex lock_;
+static struct list_head dev_list_;
+static struct mutex dev_lock_;
 static int dev_indexes_ = 0;
 struct treemap_memory_manager mmgr_;
 
@@ -456,20 +456,138 @@ retry0:
 	}
 }
 
-static int bdevt_open(struct block_device *bdev, fmode_t mode)
+/*******************************************************************************
+ * Ioctl for /dev/bdevtX
+ *******************************************************************************/
+
+static void del_dev(struct bdevt_dev *mdev);
+
+static int ioctl_stop_dev(struct bdevt_dev *mdev, struct bdevt_ctl *ctl)
+{
+	del_dev(mdev);
+	return 0;
+}
+
+static int ioctl_make_crash(struct bdevt_dev *mdev, struct bdevt_ctl *ctl)
+{
+	/* QQQ */
+	return -EFAULT;
+}
+
+static int ioctl_recover_crash(struct bdevt_dev *mdev, struct bdevt_ctl *ctl)
+{
+	/* QQQ */
+	return -EFAULT;
+}
+
+static int ioctl_make_error(struct bdevt_dev *mdev, struct bdevt_ctl *ctl)
+{
+	/* QQQ */
+	return -EFAULT;
+}
+
+static int ioctl_recover_error(struct bdevt_dev *mdev, struct bdevt_ctl *ctl)
+{
+	/* QQQ */
+	return -EFAULT;
+}
+
+static int dispatch_dev_ioctl(struct bdevt_dev *mdev, struct bdevt_ctl *ctl)
+{
+	size_t i;
+	struct {
+		int id;
+		int (*handler)(struct bdevt_dev *mdev, struct bdevt_ctl *ctl);
+	} tbl[] = {
+		{BDEVT_IOCTL_STOP_DEV, ioctl_stop_dev},
+		{BDEVT_IOCTL_MAKE_CRASH, ioctl_make_crash},
+		{BDEVT_IOCTL_RECOVER_CRASH, ioctl_recover_crash},
+		{BDEVT_IOCTL_MAKE_ERROR, ioctl_make_error},
+		{BDEVT_IOCTL_RECOVER_ERROR, ioctl_recover_error},
+	};
+
+	for (i = 0; i < sizeof(tbl); i++) {
+		if (ctl->command == tbl[i].id)
+			return tbl[i].handler(mdev, ctl);
+	}
+	LOGe("dispatch_dev_ioctl: command %d is not supported.\n",
+		ctl->command);
+	return -ENOTTY;
+}
+
+/*******************************************************************************
+ * Ioctl utility functions.
+ *******************************************************************************/
+
+static struct bdevt_ctl *bdevt_get_ctl(void __user *userctl, gfp_t gfp_mask)
+{
+	struct bdevt_ctl *ctl;
+
+	ctl = kzalloc(sizeof(*ctl), gfp_mask);
+	if (!ctl) {
+		LOGe("memory allocation for bdevt_ctl error.\n");
+		goto error0;
+	}
+
+	if (copy_from_user(ctl, userctl, sizeof(*ctl))) {
+		LOGe("copy_from_user failed.\n");
+		goto error1;
+	}
+
+	return ctl;
+
+error1:
+	kfree(ctl);
+error0:
+	return NULL;
+}
+
+static bool bdevt_put_ctl(void __user *userctl, struct bdevt_ctl *ctl)
+{
+	bool ret = true;
+
+	if (copy_to_user(userctl, ctl, sizeof(*ctl)))
+		ret = false;
+
+	kfree(ctl);
+	return ret;
+}
+
+/*******************************************************************************
+ * For /dev/bdevtX
+ *******************************************************************************/
+
+static int bdevt_dev_open(struct block_device *bdev, fmode_t mode)
 {
 	return 0;
 }
 
-static void bdevt_release(struct gendisk *gd, fmode_t mode)
+static void bdevt_dev_release(struct gendisk *gd, fmode_t mode)
 {
 	/* do nothing */
 }
 
-static int bdevt_ioctl(struct block_device *bdev, fmode_t mode,
+static int bdevt_dev_ioctl(struct block_device *bdev, fmode_t mode,
 			unsigned int cmd, unsigned long arg)
 {
-	return -ENOTTY;
+	int ret;
+	struct bdevt_ctl *ctl;
+	struct bdevt_ctl __user *user = (struct bdevt_ctl __user *)arg;
+	struct bdevt_dev *mdev = bdev->bd_disk->private_data;
+
+	if (cmd != BDEVT_IOCTL_CMD)
+		return -EFAULT;
+
+	ctl = bdevt_get_ctl(user, GFP_KERNEL);
+	if (!ctl)
+		return -EFAULT;
+
+	ret = dispatch_dev_ioctl(mdev, ctl);
+
+	if (!bdevt_put_ctl(user, ctl))
+		return -EFAULT;
+
+	return ret;
 }
 
 /*******************************************************************************
@@ -478,9 +596,9 @@ static int bdevt_ioctl(struct block_device *bdev, fmode_t mode,
 
 static struct block_device_operations bdevt_devops_ = {
 	.owner		 = THIS_MODULE,
-	.open		 = bdevt_open,
-	.release	 = bdevt_release,
-	.ioctl		 = bdevt_ioctl
+	.open		 = bdevt_dev_open,
+	.release	 = bdevt_dev_release,
+	.ioctl		 = bdevt_dev_ioctl
 };
 
 /*******************************************************************************
@@ -538,7 +656,9 @@ static void exit_bdevt_dev(struct bdevt_dev *mdev)
 
 static void del_dev(struct bdevt_dev *mdev)
 {
+	mutex_lock(&dev_lock_);
 	list_del_init(&mdev->list);
+	mutex_unlock(&dev_lock_);
 
 	del_gendisk(mdev->disk);
 	blk_cleanup_queue(mdev->q);
@@ -547,7 +667,7 @@ static void del_dev(struct bdevt_dev *mdev)
 	kfree(mdev);
 }
 
-static bool add_dev(u64 size_lb)
+static bool add_dev(u64 size_lb, u32 *minorp)
 {
 	struct bdevt_dev *mdev;
 	struct gendisk *disk;
@@ -575,10 +695,10 @@ static bool add_dev(u64 size_lb)
 		goto error2;
 	}
 
-	mutex_lock(&lock_);
+	mutex_lock(&dev_lock_);
 	list_add_tail(&mdev->list, &dev_list_);
 	mdev->index = dev_indexes_++;
-	mutex_unlock(&lock_);
+	mutex_unlock(&dev_lock_);
 
 	blk_queue_logical_block_size(q, LBS);
 	blk_queue_physical_block_size(q, LBS);
@@ -601,6 +721,10 @@ static bool add_dev(u64 size_lb)
 	disk->queue = q;
 	sprintf(disk->disk_name, "%s%u", BDEVT_NAME, mdev->index);
 	add_disk(disk);
+
+	if (minorp)
+		*minorp = mdev->index;
+
 	return true;
 
 error2:
@@ -614,42 +738,64 @@ error0:
 
 static void exit_all_devices(void)
 {
-	mutex_lock(&lock_);
+	mutex_lock(&dev_lock_);
 	while (!list_empty(&dev_list_)) {
 		struct bdevt_dev *mdev =
 			list_entry(dev_list_.next, struct bdevt_dev, list);
 		del_dev(mdev);
 	}
-	mutex_unlock(&lock_);
+	mutex_unlock(&dev_lock_);
 }
 
 static void init_globals(void)
 {
-	mutex_init(&lock_);
+	INIT_LIST_HEAD(&dev_list_);
+	mutex_init(&dev_lock_);
 }
 
 /*******************************************************************************
- * Ioctl functions.
+ * For /dev/bdevt_ctl
  *******************************************************************************/
 
 static int ioctl_start_dev(struct bdevt_ctl *ctl)
 {
-	/* QQQ */
-	return -EFAULT;
+	const u64 size_lb = ctl->val_u64;
+	u32 minor = 0;
+
+	if (size_lb == 0) {
+		LOGe("invalid size %" PRIu64 "\n", size_lb);
+		return -EFAULT;
+	}
+	if (!add_dev(size_lb, &minor)) {
+		LOGe("add_dev failed\n");
+		return -EFAULT;
+	}
+	ctl->val_u32 = minor;
+	return 0;
 }
+
 static int ioctl_get_major(struct bdevt_ctl *ctl)
 {
-	/* QQQ */
-	return -EFAULT;
+	ctl->val_u32 = major_;
+	return 0;
 }
 
 static int ioctl_num_of_dev(struct bdevt_ctl *ctl)
 {
-	/* QQQ */
-	return -EFAULT;
+	int nr = 0;
+	struct bdevt_dev *mdev;
+
+	mutex_lock(&dev_lock_);
+	list_for_each_entry(mdev, &dev_list_, list)
+		nr++;
+
+	mutex_unlock(&dev_lock_);
+
+	ctl->val_int = nr;
+	return 0;
 }
 
-static int dispatch_ioctl(struct bdevt_ctl *ctl)
+static int dispatch_ctl_ioctl(struct bdevt_ctl *ctl)
 {
 	size_t i;
 	struct {
@@ -665,43 +811,9 @@ static int dispatch_ioctl(struct bdevt_ctl *ctl)
 		if (ctl->command == tbl[i].id)
 			return tbl[i].handler(ctl);
 	}
-	LOGe("dispatch_ioctl: command %d is not supported.\n",
+	LOGe("dispatch_ctl_ioctl: command %d is not supported.\n",
 		ctl->command);
 	return -ENOTTY;
-}
-
-static struct bdevt_ctl *bdevt_get_ctl(void __user *userctl, gfp_t gfp_mask)
-{
-	struct bdevt_ctl *ctl;
-
-	ctl = kzalloc(sizeof(*ctl), gfp_mask);
-	if (!ctl) {
-		LOGe("memory allocation for bdevt_ctl error.\n");
-		goto error0;
-	}
-
-	if (copy_from_user(ctl, userctl, sizeof(*ctl))) {
-		LOGe("copy_from_user failed.\n");
-		goto error1;
-	}
-
-	return ctl;
-
-error1:
-	kfree(ctl);
-error0:
-	return NULL;
-}
-
-static bool bdevt_put_ctl(void __user *userctl, struct bdevt_ctl *ctl)
-{
-	bool ret = true;
-
-	if (copy_to_user(userctl, ctl, sizeof(*ctl)))
-		ret = false;
-
-	kfree(ctl);
-	return ret;
 }
 
 static long bdevt_ctl_ioctl(struct file *file, unsigned int command, unsigned long u)
@@ -717,7 +829,7 @@ static long bdevt_ctl_ioctl(struct file *file, unsigned int command, unsigned lo
 	if (!ctl)
 		return -EFAULT;
 
-	ret = dispatch_ioctl(ctl);
+	ret = dispatch_ctl_ioctl(ctl);
 
 	if (!bdevt_put_ctl(user, ctl))
 		return -EFAULT;

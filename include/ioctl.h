@@ -70,7 +70,7 @@ enum {
 	BDEVT_IOCTL_GET_MAJOR,
 
 	/*
-	 * Get numbr of bdevt devices.
+	 * Get number of bdevt devices.
 	 *
 	 * INPUT: None.
 	 * OUTPUT: ctl->val_int as number of bdevt devices.
