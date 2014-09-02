@@ -404,41 +404,6 @@ static struct bio_list split_bio_sectors(struct bio *bio)
 
 static void bdevt_queue_bio(struct request_queue *q, struct bio *bio)
 {
-#if 0
-	struct bio *clone, *bio2;
-	struct bio_list bl;
-
-	/* struct bdevt_dev *mdev = q->queuedata; */
-	print_bio(bio);
-
-retry0:
-	clone = bio_clone(bio, GFP_NOIO);
-	if (!clone) {
-		LOGw("bio_clone failed %p.\n", bio);
-		goto retry0;
-	}
-
-	bl = split_bio_sectors(clone);
-	pr_info("split begin %u\n", bio_list_size(&bl));
-	while ((bio2 = bio_list_pop(&bl))) {
-		print_bio(bio2);
-		bio_put(bio2);
-	}
-	ASSERT(bio_list_empty());
-	pr_info("split end\n");
-
-	/* do nothing and complete the IO. */
-
-#if 0
-	pr_info("advance\n");
-	while (bio_sectors(bio) > 0) {
-		bio_advance(bio, LBS);
-		print_bio(bio);
-	}
-#endif
-	bio_endio(bio, 0);
-#endif
-
 	struct bdevt_dev *mdev = q->queuedata;
 
 	if (bio->bi_rw & REQ_WRITE) {
