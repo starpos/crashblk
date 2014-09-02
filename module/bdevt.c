@@ -408,8 +408,14 @@ static void bdevt_queue_bio(struct request_queue *q, struct bio *bio)
 
 	if (bio->bi_rw & REQ_WRITE) {
 		if (bio->bi_rw & REQ_FLUSH) {
-			ASSERT(bio_sectors(bio) == 0);
+			LOGd("%u: flush", mdev->index);
 			flush_bdevt_dev(mdev);
+			if (bio_sectors(bio) > 0)
+				write_bio(mdev, bio);
+
+			bio_endio(bio, 0);
+		} else if (bio->bi_rw & REQ_DISCARD) {
+			/* TODO: implement */
 			bio_endio(bio, 0);
 		} else {
 			write_bio(mdev, bio);
@@ -429,6 +435,10 @@ static void del_dev(struct bdevt_dev *mdev);
 
 static int ioctl_stop_dev(struct bdevt_dev *mdev, struct bdevt_ctl *ctl)
 {
+	mutex_lock(&dev_lock_);
+	list_del_init(&mdev->list);
+	mutex_unlock(&dev_lock_);
+
 	del_dev(mdev);
 	return 0;
 }
@@ -540,7 +550,7 @@ static int bdevt_dev_ioctl(struct block_device *bdev, fmode_t mode,
 	struct bdevt_ctl __user *user = (struct bdevt_ctl __user *)arg;
 	struct bdevt_dev *mdev = bdev->bd_disk->private_data;
 
-	if (cmd != BDEVT_IOCTL_CMD)
+	if (cmd != BDEVT_IOCTL)
 		return -EFAULT;
 
 	ctl = bdevt_get_ctl(user, GFP_KERNEL);
@@ -619,12 +629,11 @@ static void exit_bdevt_dev(struct bdevt_dev *mdev)
 	mdev->map0 = NULL;
 }
 
+/**
+ * mdev must have been removed from dev_list_ before calling this.
+ */
 static void del_dev(struct bdevt_dev *mdev)
 {
-	mutex_lock(&dev_lock_);
-	list_del_init(&mdev->list);
-	mutex_unlock(&dev_lock_);
-
 	del_gendisk(mdev->disk);
 	blk_cleanup_queue(mdev->q);
 	put_disk(mdev->disk);
@@ -703,10 +712,11 @@ error0:
 
 static void exit_all_devices(void)
 {
+	struct bdevt_dev *mdev, *mdev_next;
+
 	mutex_lock(&dev_lock_);
-	while (!list_empty(&dev_list_)) {
-		struct bdevt_dev *mdev =
-			list_entry(dev_list_.next, struct bdevt_dev, list);
+	list_for_each_entry_safe(mdev, mdev_next, &dev_list_, list) {
+		list_del_init(&mdev->list);
 		del_dev(mdev);
 	}
 	mutex_unlock(&dev_lock_);
@@ -787,7 +797,7 @@ static long bdevt_ctl_ioctl(struct file *file, unsigned int command, unsigned lo
 	struct bdevt_ctl *ctl;
 	struct bdevt_ctl __user *user = (struct bdevt_ctl __user *)u;
 
-	if (command != BDEVT_IOCTL_CMD)
+	if (command != BDEVT_IOCTL)
 		return -EFAULT;
 
 	ctl = bdevt_get_ctl(user, GFP_KERNEL);
