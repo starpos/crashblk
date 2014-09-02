@@ -35,15 +35,20 @@ struct bdevt_dev
 	struct request_queue *q;
 	struct gendisk *disk;
 
-	struct mutex map_lock;
-	struct map *map0; /* cache layer */
-	struct map *map1; /* persistent layer */
-};
+	struct workqueue_struct *wq;
+	struct work_struct worker;
 
-struct page_block
-{
-	atomic_t cnt;
-	struct page *page;
+	spinlock_t lock;
+	struct bio_list bl;
+
+	/* The following data are accessed by only one thread.
+	 * using ordered workqueue.
+	 *
+	 * key: blks [page size]
+	 * value: struct *page
+	 */
+	struct map *map0; /* cache layer */
+	struct map *map1; /* persistent layer (really in memory) */
 };
 
 /*******************************************************************************
@@ -72,6 +77,11 @@ struct treemap_memory_manager mmgr_;
  * Static functions definition.
  *******************************************************************************/
 
+static void invoke_worker(struct bdevt_dev *mdev)
+{
+	queue_work(mdev->wq, &mdev->worker);
+}
+
 static inline u64 sector_to_block(u64 sectors)
 {
 	do_div(sectors, PAGE_SIZE >> 9);
@@ -83,239 +93,232 @@ static inline u64 block_to_sector(u64 blks)
 	return blks * (PAGE_SIZE >> 9);
 }
 
-static struct page_block *alloc_page_block(gfp_t gfp_mask)
+static struct page *alloc_page_retry_forever(void)
 {
-	struct page_block *pblk;
+	struct page *page = NULL;
 
-	pblk = kmalloc(sizeof(*pblk), gfp_mask);
-	if (!pblk)
-		goto error0;
-
-	pblk->page = alloc_page(gfp_mask | __GFP_ZERO);
-	if (!pblk->page)
-		goto error1;
-
-	atomic_set(&pblk->cnt, 1);
-	return pblk;
-#if 0
-error2:
-	__free_page(pblk->page);
-#endif
-error1:
-	kfree(pblk);
-error0:
-	return NULL;
-}
-
-static void get_page_block(struct page_block *pblk)
-{
-	atomic_inc(&pblk->cnt);
-}
-
-static void put_page_block(struct page_block *pblk)
-{
-	if (atomic_dec_and_test(&pblk->cnt)) {
-		__free_page(pblk->page);
-		kfree(pblk);
-	}
-}
-
-static struct page_block *alloc_page_block_retry_forever(gfp_t gfp_mask)
-{
-	struct page_block *pblk;
-
-	pblk = alloc_page_block(GFP_KERNEL);
-	while (!pblk) {
+	while (!(page = alloc_page(GFP_NOIO | __GFP_ZERO)))
 		schedule();
-		pblk = alloc_page_block(GFP_KERNEL);
-	}
-	return pblk;
+
+	return page;
 }
 
-static struct page_block *try_add_page_block_to_mdev(
-	struct bdevt_dev *mdev, u64 blks, bool is_cache)
+/**
+ * Thread-unsafe.
+ */
+static void map_add_retry_forever(struct map *map, u64 key, struct page *page)
 {
-	struct map *map = is_cache ? mdev->map0 : mdev->map1;
-	struct page_block *pblk = alloc_page_block_retry_forever(GFP_NOIO);
 	int ret;
-
 retry:
-	ret = map_add(map, blks, (unsigned long)pblk, GFP_NOIO);
-	if (ret == 0) {
-		/* Do nothing */
-	} else if (ret == -EEXIST) {
-		put_page_block(pblk);
-		pblk = (struct page_block *)map_lookup(map, blks);
-	} else {
+	ret = map_add(map, key, (unsigned long)page, GFP_NOIO);
+	ASSERT(ret != -EEXIST);
+	if (ret != 0) {
+		schedule();
 		goto retry;
 	}
-	return pblk;
 }
 
-static void copy_page_block(struct page_block *dst, struct page_block *src)
+/**
+ * Thread-unsafe.
+ */
+static struct page *get_page_for_write(struct bdevt_dev *mdev, u64 blks)
 {
-	u8 *buf_dst, *buf_src;
+	struct map_cursor curt;
+	struct page *page0, *page1;
 
-	buf_dst = kmap_atomic(dst->page);
-	buf_src = kmap_atomic(src->page);
-	memcpy(buf_dst, buf_src, PAGE_SIZE);
-	kunmap_atomic(buf_src);
-	kunmap_atomic(buf_dst);
-}
-
-static struct page_block *get_page_block_for_write(struct bdevt_dev *mdev, u64 blks)
-{
-	struct map_cursor curt0, curt1;
-	struct page_block *pblk0 = NULL, *pblk1 = NULL;
-
-	mutex_lock(&mdev->map_lock);
-
-	map_cursor_init(mdev->map0, &curt0);
-	map_cursor_init(mdev->map1, &curt1);
-	if (map_cursor_search(&curt0, blks, MAP_SEARCH_EQ)) {
-		pblk0 = (struct page_block *)map_cursor_val(&curt0);
+	map_cursor_init(mdev->map1, &curt);
+	if (map_cursor_search(&curt, blks, MAP_SEARCH_EQ)) {
+		page1 = (struct page *)map_cursor_val(&curt);
 	} else {
-		if (map_cursor_search(&curt1, blks, MAP_SEARCH_EQ))
-			pblk1 = (struct page_block *)map_cursor_val(&curt1);
+		page1 = alloc_page_retry_forever();
+		map_add_retry_forever(mdev->map1, blks, page1);
 	}
 
-	if (pblk0) {
-		/* Do nothing */
-	} else if (pblk1) {
-		pblk0 = try_add_page_block_to_mdev(mdev, blks, true);
-		copy_page_block(pblk0, pblk1);
+	map_cursor_init(mdev->map0, &curt);
+	if (map_cursor_search(&curt, blks, MAP_SEARCH_EQ)) {
+		page0 = (struct page *)map_cursor_val(&curt);
 	} else {
-		ASSERT(!pblk0);
-		pblk1 = try_add_page_block_to_mdev(mdev, blks, false);
-		pblk0 = try_add_page_block_to_mdev(mdev, blks, true);
+		page0 = alloc_page_retry_forever();
+		copy_highpage(page0, page1);
+		map_add_retry_forever(mdev->map0, blks, page0);
 	}
-	get_page_block(pblk0);
-	mutex_unlock(&mdev->map_lock);
-	return pblk0;
+
+	return page0;
 }
 
-static struct page_block *get_page_block_for_read(struct bdevt_dev *mdev, u64 blks)
+/**
+ * Thread-unsafe.
+ */
+static struct page *get_page_for_read(struct bdevt_dev *mdev, u64 blks)
 {
-	struct map_cursor curt0, curt1;
-	struct page_block *pblk0 = NULL, *pblk1 = NULL;
+	struct map_cursor curt;
 
-	mutex_lock(&mdev->map_lock);
-
-	map_cursor_init(mdev->map0, &curt0);
-	map_cursor_init(mdev->map1, &curt1);
-	if (map_cursor_search(&curt0, blks, MAP_SEARCH_EQ)) {
-		pblk0 = (struct page_block *)map_cursor_val(&curt0);
-	} else {
-		if (map_cursor_search(&curt1, blks, MAP_SEARCH_EQ))
-			pblk1 = (struct page_block *)map_cursor_val(&curt1);
+	map_cursor_init(mdev->map0, &curt);
+	if (map_cursor_search(&curt, blks, MAP_SEARCH_EQ)) {
+		return (struct page *)map_cursor_val(&curt);
 	}
 
-	if (pblk0) {
-		get_page_block(pblk0);
-		mutex_unlock(&mdev->map_lock);
-		return pblk0;
+	map_cursor_init(mdev->map1, &curt);
+	if (map_cursor_search(&curt, blks, MAP_SEARCH_EQ)) {
+		return (struct page *)map_cursor_val(&curt);
 	}
-	if (pblk1) {
-		get_page_block(pblk1);
-		mutex_unlock(&mdev->map_lock);
-		return pblk1;
-	}
-	pblk1 = try_add_page_block_to_mdev(mdev, blks, false);
-	get_page_block(pblk1);
-	mutex_unlock(&mdev->map_lock);
-	return pblk1;
+
+	return ZERO_PAGE(0);
 }
 
-static void write_bio(struct bdevt_dev *mdev, struct bio *bio)
+/**
+ * Thread-unsafe.
+ */
+static void exec_bio(struct bdevt_dev *mdev, struct bio *bio)
 {
-	struct page_block *pblk;
+	struct page *page;
 	u64 blks;
-	u32 dst_off, src_off;
-	u8 *src_buf, *dst_buf;
+	u32 bio_off, page_off;
+	u8 *bio_buf, *page_buf;
+	bool is_write = bio->bi_rw & REQ_WRITE;
+
+	ASSERT(!(bio->bi_rw & REQ_DISCARD));
 
 	while (bio_sectors(bio) > 0) {
+		u32 bytes;
 		blks = bio->bi_iter.bi_sector;
-		dst_off = do_div(blks, PAGE_SIZE >> 9) * LBS;
-		src_off = bio_offset(bio);
+		page_off = do_div(blks, PAGE_SIZE >> 9) << 9;
+		bio_off = bio_offset(bio);
+		bytes = min(bio_iter_len(bio, bio->bi_iter), (u32)(PAGE_SIZE) - page_off);
 
-		pblk = get_page_block_for_write(mdev, blks);
+		if (is_write)
+			page = get_page_for_write(mdev, blks);
+		else
+			page = get_page_for_read(mdev, blks);
 
-		dst_buf = kmap_atomic(pblk->page);
-		src_buf = kmap_atomic(bio_page(bio));
-		memcpy(dst_buf + dst_off, src_buf + src_off, LBS);
-		kunmap_atomic(dst_buf);
-		kunmap_atomic(src_buf);
+		page_buf = kmap_atomic(page);
+		bio_buf = kmap_atomic(bio_page(bio));
+		if (is_write)
+			memcpy(page_buf + page_off, bio_buf + bio_off, bytes);
+		else
+			memcpy(bio_buf + bio_off, page_buf + page_off, bytes);
 
-		put_page_block(pblk);
-		bio_advance(bio, LBS);
+		kunmap_atomic(page_buf);
+		kunmap_atomic(bio_buf);
+
+		bio_advance(bio, bytes);
 	}
 }
 
-static void read_bio(struct bdevt_dev *mdev, struct bio *bio)
+/**
+ * Thread-unsafe.
+ */
+static void discard_block(struct bdevt_dev *mdev, u64 blks)
 {
-	struct page_block *pblk;
-	u64 blks;
-	u32 src_off, dst_off;
-	u8 *src_buf, *dst_buf;
+	struct map_cursor curt;
+	struct page *page;
+	struct map *maps[2] = {mdev->map0, mdev->map1};
+	size_t i;
 
-	while (bio_sectors(bio) > 0) {
-		blks = bio->bi_iter.bi_sector;
-		src_off = do_div(blks, PAGE_SIZE >> 9) * LBS;
-		dst_off = bio_offset(bio);
-
-		pblk = get_page_block_for_read(mdev, blks);
-
-		src_buf = kmap_atomic(pblk->page);
-		dst_buf = kmap_atomic(bio_page(bio));
-		memcpy(dst_buf + dst_off, src_buf + src_off, LBS);
-		kunmap_atomic(dst_buf);
-		kunmap_atomic(src_buf);
-
-		put_page_block(pblk);
-		bio_advance(bio, LBS);
-	}
-}
-
-static bool flush_bdevt_dev_partial(struct bdevt_dev *mdev, u32 nr_blks)
-{
-	u32 i;
-	bool ret = true;
-
-	mutex_lock(&mdev->map_lock);
-	for (i = 0; i < nr_blks; i++) {
-		struct map_cursor curt0, curt1;
-		u64 blks;
-		struct page_block *pblk0, *pblk1;
-
-		if (map_is_empty(mdev->map0)) {
-			ret = false;
-			break;
+	for (i = 0; i < 2; i++) {
+		map_cursor_init(maps[i], &curt);
+		if (map_cursor_search(&curt, blks, MAP_SEARCH_EQ)) {
+			page = (struct page *)map_cursor_val(&curt);
+			__free_page(page);
+			map_cursor_del(&curt);
 		}
-
-		map_cursor_init(mdev->map0, &curt0);
-		map_cursor_begin(&curt0);
-		map_cursor_next(&curt0);
-		ASSERT(map_cursor_is_valid(&curt0));
-
-		blks = map_cursor_key(&curt0);
-		pblk0 = (struct page_block *)map_cursor_val(&curt0);
-		map_cursor_del(&curt0);
-
-		map_cursor_init(mdev->map1, &curt1);
-		map_cursor_search(&curt1, blks, MAP_SEARCH_EQ);
-		ASSERT(map_cursor_is_valid(&curt1));
-		pblk1 = (struct page_block *)map_cursor_val(&curt1);
-
-		copy_page_block(pblk1, pblk0);
-		put_page_block(pblk0);
 	}
-	mutex_unlock(&mdev->map_lock);
-	return ret;
 }
 
-static void flush_bdevt_dev(struct bdevt_dev *mdev)
+/**
+ * Thread-unsafe.
+ */
+static void discard_bio(struct bdevt_dev *mdev, struct bio *bio)
 {
-	while (flush_bdevt_dev_partial(mdev, 32));
+	ASSERT(!(bio->bi_rw & REQ_FLUSH));
+	ASSERT(bio->bi_rw & REQ_WRITE);
+	ASSERT(bio->bi_rw & REQ_DISCARD);
+
+	while (bio_sectors(bio) > 0) {
+		struct page *page;
+		u32 bytes, page_off;
+		u32 blks = bio->bi_iter.bi_sector;
+		page_off = do_div(blks, PAGE_SIZE >> 9) << 9;
+		bytes = min(bio->bi_iter.bi_size, (u32)PAGE_SIZE - page_off);
+
+		if (bytes == (u32)PAGE_SIZE) {
+			ASSERT(page_off == 0);
+			discard_block(mdev, blks);
+		} else {
+			char *page_buf;
+			page = get_page_for_write(mdev, blks);
+			page_buf = kmap_atomic(page);
+			memset(page_buf + page_off, 0, bytes);
+		}
+		bio_advance(bio, bytes);
+	}
+}
+
+/**
+ * Thread-unsafe.
+ */
+static void flush_all_blocks(struct bdevt_dev *mdev)
+{
+	while (!map_is_empty(mdev->map0)) {
+		struct map_cursor curt;
+		struct page *page0, *page1;
+		u64 blks;
+
+		map_cursor_init(mdev->map0, &curt);
+		map_cursor_begin(&curt);
+		map_cursor_next(&curt);
+		ASSERT(map_cursor_is_valid(&curt));
+		blks = map_cursor_key(&curt);
+		page0 = (struct page *)map_cursor_val(&curt);
+		map_cursor_del(&curt);
+
+		map_cursor_init(mdev->map1, &curt);
+		if (!map_cursor_search(&curt, blks, MAP_SEARCH_EQ))
+			BUG();
+
+		page1 = (struct page *)map_cursor_val(&curt);
+
+		copy_highpage(page1, page0);
+	}
+}
+
+/**
+ * Thread-unsafe.
+ */
+static void process_bio(struct bdevt_dev *mdev, struct bio *bio)
+{
+	if (bio->bi_rw & REQ_WRITE) {
+		if (bio->bi_rw & REQ_FLUSH) {
+			LOGd("%u: flush", mdev->index);
+			flush_all_blocks(mdev);
+			if (bio_sectors(bio) > 0)
+				exec_bio(mdev, bio);
+		} else if (bio->bi_rw & REQ_DISCARD) {
+			discard_bio(mdev, bio);
+		} else {
+			exec_bio(mdev, bio);
+		}
+	} else {
+		exec_bio(mdev, bio);
+	}
+	bio_endio(bio, 0);
+}
+
+static void do_work(struct work_struct *ws)
+{
+	struct bdevt_dev *mdev = container_of(ws, struct bdevt_dev, worker);
+	struct bio_list bl;
+	struct bio *bio;
+
+	bio_list_init(&bl);
+
+	spin_lock(&mdev->lock);
+	bio_list_merge(&bl, &mdev->bl);
+	bio_list_init(&mdev->bl);
+	spin_unlock(&mdev->lock);
+
+	while ((bio = bio_list_pop(&bl)))
+		process_bio(mdev, bio);
 }
 
 static inline void print_bvec_iter(struct bvec_iter *iter, const char *prefix)
@@ -406,25 +409,11 @@ static void bdevt_queue_bio(struct request_queue *q, struct bio *bio)
 {
 	struct bdevt_dev *mdev = q->queuedata;
 
-	if (bio->bi_rw & REQ_WRITE) {
-		if (bio->bi_rw & REQ_FLUSH) {
-			LOGd("%u: flush", mdev->index);
-			flush_bdevt_dev(mdev);
-			if (bio_sectors(bio) > 0)
-				write_bio(mdev, bio);
+	spin_lock(&mdev->lock);
+	bio_list_add(&mdev->bl, bio);
+	spin_unlock(&mdev->lock);
 
-			bio_endio(bio, 0);
-		} else if (bio->bi_rw & REQ_DISCARD) {
-			/* TODO: implement */
-			bio_endio(bio, 0);
-		} else {
-			write_bio(mdev, bio);
-			bio_endio(bio, 0);
-		}
-	} else {
-		read_bio(mdev, bio);
-		bio_endio(bio, 0);
-	}
+	invoke_worker(mdev);
 }
 
 /*******************************************************************************
@@ -582,7 +571,8 @@ static struct block_device_operations bdevt_devops_ = {
 
 static bool init_bdevt_dev(struct bdevt_dev *mdev)
 {
-	mutex_init(&mdev->map_lock);
+	spin_lock(&mdev->lock);
+	bio_list_init(&mdev->bl);
 
 	mdev->map0 = map_create(GFP_KERNEL, &mmgr_);
 	if (!mdev->map0) {
@@ -619,7 +609,7 @@ static void exit_bdevt_dev(struct bdevt_dev *mdev)
 	map_cursor_begin(&curt);
 	map_cursor_next(&curt);
 	while (!map_cursor_is_end(&curt)) {
-		put_page_block((struct page_block *)map_cursor_val(&curt));
+		__free_page((struct page *)map_cursor_val(&curt));
 		map_cursor_del(&curt);
 	}
 
@@ -637,6 +627,12 @@ static void del_dev(struct bdevt_dev *mdev)
 	const u32 minor = mdev->index;
 
 	del_gendisk(mdev->disk);
+
+	/* Complete all pending IOs. */
+	invoke_worker(mdev);
+	flush_workqueue(mdev->wq);
+
+	destroy_workqueue(mdev->wq);
 	blk_cleanup_queue(mdev->q);
 	put_disk(mdev->disk);
 	exit_bdevt_dev(mdev);
@@ -673,6 +669,13 @@ static bool add_dev(u64 size_lb, u32 *minorp)
 		goto error2;
 	}
 
+	mdev->wq = alloc_ordered_workqueue(BDEVT_NAME, WQ_MEM_RECLAIM);
+	if (!mdev->wq) {
+		LOGe("unable to allocate workqueue.\n");
+		goto error3;
+	}
+	INIT_WORK(&mdev->worker, do_work);
+
 	mutex_lock(&dev_lock_);
 	list_add_tail(&mdev->list, &dev_list_);
 	mdev->index = dev_indexes_++;
@@ -697,7 +700,7 @@ static bool add_dev(u64 size_lb, u32 *minorp)
 	disk->fops = &bdevt_devops_;
 	disk->private_data = mdev;
 	disk->queue = q;
-	sprintf(disk->disk_name, "%s%u", BDEVT_NAME, mdev->index);
+	snprintf(disk->disk_name, DISK_NAME_LEN, "%s%u", BDEVT_NAME, mdev->index);
 	add_disk(disk);
 
 	if (minorp)
@@ -707,6 +710,12 @@ static bool add_dev(u64 size_lb, u32 *minorp)
 
 	return true;
 
+#if 0
+error4:
+	destroy_workqueue(mdev->wq);
+#endif
+error3:
+	put_disk(mdev->disk);
 error2:
 	blk_cleanup_queue(mdev->q);
 error1:
