@@ -15,6 +15,7 @@
 #include <linux/compat.h>
 #include <linux/miscdevice.h>
 #include <linux/spinlock.h>
+#include <linux/idr.h>
 
 #include "common.h"
 #include "block_size.h"
@@ -66,10 +67,10 @@ struct bdevt_dev
 static int is_put_log_ = false;
 
 static int major_;
-static struct list_head dev_list_;
-static struct mutex dev_lock_;
-static int dev_indexes_ = 0;
 struct treemap_memory_manager mmgr_;
+
+static spinlock_t dev_lock_;
+static struct idr dev_idr_;
 
 /*******************************************************************************
  * Module parameter definitions.
@@ -87,6 +88,63 @@ module_param_named(is_put_log, is_put_log_, int, S_IRUGO | S_IWUSR);
 /*******************************************************************************
  * Static functions definition.
  *******************************************************************************/
+
+static bool add_dev_to_idr(struct bdevt_dev *mdev)
+{
+	int minor;
+
+	idr_preload(GFP_KERNEL);
+	spin_lock(&dev_lock_);
+	minor = idr_alloc(&dev_idr_, mdev, 0, 1 << MINORBITS, GFP_NOWAIT);
+	spin_unlock(&dev_lock_);
+	idr_preload_end();
+	if (minor < 0)
+		return false;
+
+	mdev->index = (u32)minor;
+	return true;
+}
+
+static void del_dev_from_idr(struct bdevt_dev *mdev)
+{
+	ASSERT(mdev->index < (1 << MINORBITS));
+
+	spin_lock(&dev_lock_);
+	idr_remove(&dev_idr_, (int)mdev->index);
+	spin_unlock(&dev_lock_);
+}
+
+static struct bdevt_dev *pop_dev_from_idr(void)
+{
+	struct bdevt_dev *mdev;
+	int minor = 0;
+
+	spin_lock(&dev_lock_);
+	mdev = idr_get_next(&dev_idr_, &minor);
+	if (mdev)
+		idr_remove(&dev_idr_, minor);
+
+	spin_unlock(&dev_lock_);
+
+	if (mdev)
+		ASSERT((u32)minor == mdev->index);
+
+	return mdev;
+}
+
+static int get_nr_dev_in_idr(void)
+{
+	struct bdevt_dev *mdev;
+	int minor, nr = 0;
+
+	spin_lock(&dev_lock_);
+	idr_for_each_entry(&dev_idr_, mdev, minor)
+		nr++;
+
+	spin_unlock(&dev_lock_);
+
+	return nr;
+}
 
 static void invoke_worker(struct bdevt_dev *mdev)
 {
@@ -453,10 +511,7 @@ static void del_dev(struct bdevt_dev *mdev);
 
 static int ioctl_stop_dev(struct bdevt_dev *mdev, struct bdevt_ctl *ctl)
 {
-	mutex_lock(&dev_lock_);
-	list_del_init(&mdev->list);
-	mutex_unlock(&dev_lock_);
-
+	del_dev_from_idr(mdev);
 	del_dev(mdev);
 	return 0;
 }
@@ -623,6 +678,7 @@ static struct bdevt_dev *create_bdevt_dev(void)
 	spin_lock_init(&mdev->lock);
 	bio_list_init(&mdev->bl);
 	atomic_set(&mdev->nr_running, 0);
+	mdev->index = (u32)(-1);
 
 	return mdev;
 
@@ -719,11 +775,8 @@ static bool add_dev(u64 size_lb, u32 *minorp)
 	}
 	INIT_WORK(&mdev->worker, do_work);
 
-	mutex_lock(&dev_lock_);
-	list_add_tail(&mdev->list, &dev_list_);
-	mdev->index = dev_indexes_++;
-
-	mutex_unlock(&dev_lock_);
+	if (!add_dev_to_idr(mdev))
+		goto error3;
 
 	blk_queue_logical_block_size(q, LBS);
 	blk_queue_physical_block_size(q, LBS);
@@ -754,9 +807,11 @@ static bool add_dev(u64 size_lb, u32 *minorp)
 	return true;
 
 #if 0
+error4:
+	del_dev_from_idr(mdev);
+#endif
 error3:
 	destroy_workqueue(mdev->wq);
-#endif
 error2:
 	put_disk(mdev->disk);
 error1:
@@ -768,20 +823,16 @@ error0:
 
 static void exit_all_devices(void)
 {
-	struct bdevt_dev *mdev, *mdev_next;
+	struct bdevt_dev *mdev;
 
-	mutex_lock(&dev_lock_);
-	list_for_each_entry_safe(mdev, mdev_next, &dev_list_, list) {
-		list_del_init(&mdev->list);
+	while ((mdev = pop_dev_from_idr()))
 		del_dev(mdev);
-	}
-	mutex_unlock(&dev_lock_);
 }
 
 static void init_globals(void)
 {
-	INIT_LIST_HEAD(&dev_list_);
-	mutex_init(&dev_lock_);
+	spin_lock_init(&dev_lock_);
+	idr_init(&dev_idr_);
 }
 
 /*******************************************************************************
@@ -813,14 +864,7 @@ static int ioctl_get_major(struct bdevt_ctl *ctl)
 
 static int ioctl_num_of_dev(struct bdevt_ctl *ctl)
 {
-	int nr = 0;
-	struct bdevt_dev *mdev;
-
-	mutex_lock(&dev_lock_);
-	list_for_each_entry(mdev, &dev_list_, list)
-		nr++;
-
-	mutex_unlock(&dev_lock_);
+	int nr = get_nr_dev_in_idr();
 
 	ctl->val_int = nr;
 	return 0;
@@ -935,6 +979,7 @@ static void __exit bdevt_exit(void)
 	misc_deregister(&bdevt_misc_);
 	exit_all_devices();
 	unregister_blkdev(major_, BDEVT_NAME);
+	idr_destroy(&dev_idr_);
 	LOGi("%s module exit.\n", BDEVT_NAME);
 }
 
