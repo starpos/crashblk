@@ -784,8 +784,8 @@ static bool add_dev(u64 size_lb, u32 *minorp)
 	blk_queue_io_min(q, LBS);
 	blk_queue_io_opt(q, LBS);
 	q->limits.discard_granularity = PAGE_SIZE;
-	q->limits.max_discard_sectors = -1;
-	q->limits.discard_zeroes_data = 0;
+	q->limits.max_discard_sectors = UINT_MAX;
+	q->limits.discard_zeroes_data = 1;
 	queue_flag_set_unlocked(QUEUE_FLAG_DISCARD, q);
 	blk_queue_flush(q, REQ_FLUSH);
 	blk_queue_flush_queueable(q, true);
