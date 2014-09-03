@@ -56,8 +56,8 @@ Make a device in error state:
 ```
 You can specify `MODE` as `r`, `w`, or `rw`.
 
-| mode | description    |
-|------+----------------|
+| Mode | Description    |
+|------|----------------|
 | `r`  | read IOs fail  |
 | `w`  | write IOs fail |
 | `rw` | all IOs fail   |
