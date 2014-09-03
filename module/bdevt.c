@@ -35,13 +35,19 @@ struct bdevt_dev
 	struct request_queue *q;
 	struct gendisk *disk;
 
+	/* Ordered queue for serialized (single-threaded) tasks. */
 	struct workqueue_struct *wq;
 	struct work_struct worker;
 
+	/*
+	 * Temporarily inserted bio list.
+	 * This needs lock to access to.
+	 */
 	spinlock_t lock;
 	struct bio_list bl;
 
-	/* The following data are accessed by only one thread.
+	/*
+	 * The following data are accessed by only one thread.
 	 * using ordered workqueue.
 	 *
 	 * key: blks [page size]
@@ -569,10 +575,15 @@ static struct block_device_operations bdevt_devops_ = {
  * Static functions definition.
  *******************************************************************************/
 
-static bool init_bdevt_dev(struct bdevt_dev *mdev)
+static struct bdevt_dev *create_bdevt_dev(void)
 {
-	spin_lock(&mdev->lock);
-	bio_list_init(&mdev->bl);
+	struct bdevt_dev *mdev;
+
+	mdev = kzalloc(sizeof(*mdev), GFP_KERNEL);
+	if (!mdev) {
+		LOGe("allocate mdev failed.");
+		return NULL;
+	}
 
 	mdev->map0 = map_create(GFP_KERNEL, &mmgr_);
 	if (!mdev->map0) {
@@ -586,7 +597,10 @@ static bool init_bdevt_dev(struct bdevt_dev *mdev)
 		goto error1;
 	}
 
-	return true;
+	spin_lock_init(&mdev->lock);
+	bio_list_init(&mdev->bl);
+
+	return mdev;
 
 #if 0
 error2:
@@ -597,26 +611,31 @@ error1:
 	map_destroy(mdev->map0);
 	mdev->map0 = NULL;
 error0:
-	return false;
+	kfree(mdev);
+	return NULL;
 }
 
-static void exit_bdevt_dev(struct bdevt_dev *mdev)
+static void free_all_pages_in_map(struct map *map)
 {
 	struct map_cursor curt;
 
-	/* Deallocate all blocks */
-	map_cursor_init(mdev->map0, &curt);
+	map_cursor_init(map, &curt);
 	map_cursor_begin(&curt);
 	map_cursor_next(&curt);
 	while (!map_cursor_is_end(&curt)) {
 		__free_page((struct page *)map_cursor_val(&curt));
 		map_cursor_del(&curt);
 	}
+	ASSERT(map_is_empty(map));
+}
 
-	map_destroy(mdev->map1);
-	mdev->map1 = NULL;
+static void destroy_bdevt_dev(struct bdevt_dev *mdev)
+{
+	free_all_pages_in_map(mdev->map0);
+	free_all_pages_in_map(mdev->map1);
 	map_destroy(mdev->map0);
-	mdev->map0 = NULL;
+	map_destroy(mdev->map1);
+	kfree(mdev);
 }
 
 /**
@@ -635,8 +654,7 @@ static void del_dev(struct bdevt_dev *mdev)
 	destroy_workqueue(mdev->wq);
 	blk_cleanup_queue(mdev->q);
 	put_disk(mdev->disk);
-	exit_bdevt_dev(mdev);
-	kfree(mdev);
+	destroy_bdevt_dev(mdev);
 
 	LOGi("deleted bdevt%u\n", minor);
 }
@@ -647,32 +665,29 @@ static bool add_dev(u64 size_lb, u32 *minorp)
 	struct gendisk *disk;
 	struct request_queue *q;
 
-	mdev = kzalloc(sizeof(*mdev), GFP_KERNEL);
+	mdev = create_bdevt_dev();
 	if (!mdev)
-		return -ENOMEM;
-
-	if (!init_bdevt_dev(mdev))
-		goto error0;
+		return false;
 
 	INIT_LIST_HEAD(&mdev->list);
 
 	q = mdev->q = blk_alloc_queue(GFP_KERNEL);
 	if (!q) {
 		LOGe("mdev->q init failed.\n");
-		goto error1;
+		goto error0;
 	}
 	q->queuedata = mdev;
 	blk_queue_make_request(q, bdevt_queue_bio);
 	disk = mdev->disk = alloc_disk(1);
 	if (!disk) {
 		LOGe("mdev->disk alloc failed.\n");
-		goto error2;
+		goto error1;
 	}
 
 	mdev->wq = alloc_ordered_workqueue(BDEVT_NAME, WQ_MEM_RECLAIM);
 	if (!mdev->wq) {
 		LOGe("unable to allocate workqueue.\n");
-		goto error3;
+		goto error2;
 	}
 	INIT_WORK(&mdev->worker, do_work);
 
@@ -707,21 +722,18 @@ static bool add_dev(u64 size_lb, u32 *minorp)
 		*minorp = mdev->index;
 
 	LOGi("added bdevt%u\n", mdev->index);
-
 	return true;
 
 #if 0
-error4:
+error3:
 	destroy_workqueue(mdev->wq);
 #endif
-error3:
-	put_disk(mdev->disk);
 error2:
-	blk_cleanup_queue(mdev->q);
+	put_disk(mdev->disk);
 error1:
-	exit_bdevt_dev(mdev);
+	blk_cleanup_queue(mdev->q);
 error0:
-	kfree(mdev);
+	destroy_bdevt_dev(mdev);
 	return false;
 }
 
