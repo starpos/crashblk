@@ -724,7 +724,7 @@ static int ioctl_make_crash(struct bdevt_dev *mdev, struct bdevt_ctl *ctl)
 			, mdev->index, prev_st, st);
 		return -EFAULT;
 	}
-	LOGi("%u: state change: crashing", mdev->index);
+	LOGi("%u: state change: crashing\n", mdev->index);
 
 	invoke_crash_task(mdev);
 	flush_workqueue(mdev->wq);
@@ -739,7 +739,7 @@ static int ioctl_make_crash(struct bdevt_dev *mdev, struct bdevt_ctl *ctl)
 		atomic_set(&mdev->state, 0); /* reset */
 		return -EFAULT;
 	}
-	LOGi("%u: state change: crashed", mdev->index);
+	LOGi("%u: state change: crashed\n", mdev->index);
 	return 0;
 }
 
