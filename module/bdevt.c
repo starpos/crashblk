@@ -1103,15 +1103,13 @@ static int ioctl_start_dev(struct bdevt_ctl *ctl)
 
 static int ioctl_get_major(struct bdevt_ctl *ctl)
 {
-	ctl->val_u32 = major_;
+	ctl->val_int = major_;
 	return 0;
 }
 
 static int ioctl_num_of_dev(struct bdevt_ctl *ctl)
 {
-	int nr = get_nr_dev_in_idr();
-
-	ctl->val_int = nr;
+	ctl->val_int = get_nr_dev_in_idr();
 	return 0;
 }
 

@@ -64,7 +64,7 @@ enum {
 	 * Get major id.
 	 *
 	 * INPUT: None.
-	 * OUTPUT: ctl->val_u32 as major id.
+	 * OUTPUT: ctl->val_int as major id.
 	 * RETURN: 0 in success, or -EFAULT.
 	 */
 	BDEVT_IOCTL_GET_MAJOR,

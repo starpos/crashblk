@@ -120,14 +120,23 @@ void doDelete(const StrVec &params)
 
 void doNumDev(const StrVec &params)
 {
-    unused(params);
-    NYI(__func__);
+    if (params.empty()) throw Exception("specify device.");
+    const std::string &devPath = params[0];
+
+    struct bdevt_ctl ctl = {
+        .command = BDEVT_IOCTL_NUM_OF_DEV,
+    };
+    invokeIoctl(devPath, ctl);
+    std::cout << ctl.val_int << std::endl; // number of devices.
 }
 
-void doGetMajor(const StrVec &params)
+void doGetMajor(const StrVec &)
 {
-    unused(params);
-    NYI(__func__);
+    struct bdevt_ctl ctl = {
+        .command = BDEVT_IOCTL_GET_MAJOR,
+    };
+    invokeIoctl(ctlPath, ctl);
+    std::cout << ctl.val_int << std::endl; // device major id.
 }
 
 void doMakeError(const StrVec &params)
@@ -165,10 +174,10 @@ void dispatch(int argc, char *argv[])
         {"delete", doDelete, "DEV"},
         {"num-dev", doNumDev, ""},
         {"get-major", doGetMajor, ""},
-        {"make-error", doMakeError, "QQQ"},
-        {"recover-error", doRecoverError, "QQQ"},
-        {"make-crash", doMakeCrash, "QQQ"},
-        {"recover-crash", doRecoverCrash, "QQQ"},
+        {"make-error", doMakeError, "MODE (r/w/rw)"},
+        {"recover-error", doRecoverError, ""},
+        {"make-crash", doMakeCrash, ""},
+        {"recover-crash", doRecoverCrash, ""},
     };
 
     if (argc < 2) {
