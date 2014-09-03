@@ -98,6 +98,7 @@ static bool add_dev_to_idr(struct bdevt_dev *mdev)
 	minor = idr_alloc(&dev_idr_, mdev, 0, 1 << MINORBITS, GFP_NOWAIT);
 	spin_unlock(&dev_lock_);
 	idr_preload_end();
+
 	if (minor < 0)
 		return false;
 
@@ -490,7 +491,7 @@ static struct bio_list split_bio_sectors(struct bio *bio)
 	return bl;
 }
 
-static void bdevt_queue_bio(struct request_queue *q, struct bio *bio)
+static void bdevt_make_request(struct request_queue *q, struct bio *bio)
 {
 	struct bdevt_dev *mdev = q->queuedata;
 
@@ -761,7 +762,7 @@ static bool add_dev(u64 size_lb, u32 *minorp)
 		goto error0;
 	}
 	q->queuedata = mdev;
-	blk_queue_make_request(q, bdevt_queue_bio);
+	blk_queue_make_request(q, bdevt_make_request);
 	disk = mdev->disk = alloc_disk(1);
 	if (!disk) {
 		LOGe("mdev->disk alloc failed.\n");
