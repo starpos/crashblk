@@ -91,6 +91,19 @@ void invokeIoctl(const std::string &path, struct bdevt_ctl &ctl)
     file.close();
 }
 
+void invokeIoctlWithoutParam(const std::string &path, struct bdevt_ctl &ctl, int command)
+{
+    ::memset(&ctl, 0, sizeof(ctl));
+    ctl.command = command;
+    invokeIoctl(path, ctl);
+}
+
+const std::string& getDevPath(const StrVec &params)
+{
+    if (params.empty()) throw Exception("specify device.");
+    return params[0];
+}
+
 void doCreate(const StrVec &params)
 {
     if (params.empty()) throw Exception("specify size.");
@@ -106,13 +119,10 @@ void doCreate(const StrVec &params)
 
 void doDelete(const StrVec &params)
 {
-    if (params.empty()) throw Exception("specify device.");
-    const std::string &devPath = params[0];
+    const std::string &devPath = getDevPath(params);
 
-    struct bdevt_ctl ctl = {
-        .command = BDEVT_IOCTL_STOP_DEV,
-    };
-    invokeIoctl(devPath, ctl);
+    struct bdevt_ctl ctl;
+    invokeIoctlWithoutParam(devPath, ctl, BDEVT_IOCTL_STOP_DEV);
 }
 
 #define NYI(func) \
@@ -120,47 +130,66 @@ void doDelete(const StrVec &params)
 
 void doNumDev(const StrVec &params)
 {
-    if (params.empty()) throw Exception("specify device.");
-    const std::string &devPath = params[0];
+    const std::string &devPath = getDevPath(params);
 
-    struct bdevt_ctl ctl = {
-        .command = BDEVT_IOCTL_NUM_OF_DEV,
-    };
-    invokeIoctl(devPath, ctl);
+    struct bdevt_ctl ctl;
+    invokeIoctlWithoutParam(devPath, ctl, BDEVT_IOCTL_NUM_OF_DEV);
     std::cout << ctl.val_int << std::endl; // number of devices.
 }
 
 void doGetMajor(const StrVec &)
 {
-    struct bdevt_ctl ctl = {
-        .command = BDEVT_IOCTL_GET_MAJOR,
-    };
-    invokeIoctl(ctlPath, ctl);
+    struct bdevt_ctl ctl;
+    invokeIoctlWithoutParam(ctlPath, ctl, BDEVT_IOCTL_GET_MAJOR);
     std::cout << ctl.val_int << std::endl; // device major id.
 }
 
 void doMakeError(const StrVec &params)
 {
-    unused(params);
-    NYI(__func__);
+    const std::string &devPath = getDevPath(params);
+
+    int state;
+    if (params.size() < 2) {
+        state = BDEVT_STATE_RW_ERROR;
+    } else if (params[1] == "rw") {
+        state = BDEVT_STATE_RW_ERROR;
+    } else if (params[1] == "r") {
+        state = BDEVT_STATE_READ_ERROR;
+    } else if (params[1] == "w") {
+        state = BDEVT_STATE_WRITE_ERROR;
+    } else {
+        throw Exception("bad mode") << params[1];
+    }
+
+    struct bdevt_ctl ctl = {
+        .command = BDEVT_IOCTL_MAKE_ERROR,
+        .val_int = state,
+    };
+    invokeIoctl(devPath, ctl);
 }
 
 void doRecoverError(const StrVec &params)
 {
-    unused(params);
-    NYI(__func__);
+    const std::string &devPath = getDevPath(params);
+
+    struct bdevt_ctl ctl;
+    invokeIoctlWithoutParam(devPath, ctl, BDEVT_IOCTL_RECOVER_ERROR);
 }
 
 void doMakeCrash(const StrVec &params)
 {
-    unused(params);
-    NYI(__func__);
+    const std::string &devPath = getDevPath(params);
+
+    struct bdevt_ctl ctl;
+    invokeIoctlWithoutParam(devPath, ctl, BDEVT_IOCTL_MAKE_CRASH);
 }
 
 void doRecoverCrash(const StrVec &params)
 {
-    unused(params);
-    NYI(__func__);
+    const std::string &devPath = getDevPath(params);
+
+    struct bdevt_ctl ctl;
+    invokeIoctlWithoutParam(devPath, ctl, BDEVT_IOCTL_RECOVER_CRASH);
 }
 
 void dispatch(int argc, char *argv[])
