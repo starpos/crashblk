@@ -141,6 +141,81 @@ static void free_all_pages_in_map(struct map *map)
 }
 
 /*
+ * Utilities for bio debug.
+ */
+
+/**
+ * unused
+ */
+static inline void print_bvec_iter(struct bvec_iter *iter, const char *prefix)
+{
+	pr_info("%sbvec_iter: sector %" PRIu64 " size %u idx %u bvec_done %u\n"
+		, prefix
+		, (u64)iter->bi_sector
+		, iter->bi_size
+		, iter->bi_idx
+		, iter->bi_bvec_done);
+}
+
+/**
+ * unused
+ */
+static inline void print_bio_vec(struct bio_vec *bv, const char *prefix)
+{
+	pr_info("%sbio_vec: page %p len %u offset %u\n"
+		, prefix
+		, bv->bv_page
+		, bv->bv_len
+		, bv->bv_offset);
+}
+
+/**
+ * unused
+ */
+static inline void print_bio(struct bio *bio)
+{
+	struct bio_vec bv;
+	struct bvec_iter iter;
+
+	if (!bio) {
+		pr_info("bio null\n");
+		return;
+	}
+	pr_info("bio %p\n"
+		"  bi_next %p\n"
+		"  bi_flags %lx\n"
+		"  bi_rw %lx\n"
+		"  bi_phys_segments %u\n"
+		"  bi_seg_front_size %u\n"
+		"  bi_seg_back_size %u\n"
+		"  bi_remaining %d\n"
+		"  bi_end_io %p\n"
+		"  bi_private %p\n"
+		"  bi_vcnt %u\n"
+		"  bi_max_vecs %u\n"
+		"  bi_cnt %d\n"
+		, bio
+		, bio->bi_next
+		, bio->bi_flags
+		, bio->bi_rw
+		, bio->bi_phys_segments
+		, bio->bi_seg_front_size
+		, bio->bi_seg_back_size
+		, atomic_read(&bio->bi_remaining)
+		, bio->bi_end_io
+		, bio->bi_private
+		, bio->bi_vcnt
+		, bio->bi_max_vecs
+		, atomic_read(&bio->bi_cnt));
+	print_bvec_iter(&bio->bi_iter, "  cur ");
+
+	bio_for_each_segment(bv, bio, iter) {
+		print_bvec_iter(&iter, "  ");
+		print_bio_vec(&bv, "  ");
+	}
+}
+
+/*
  * State utilities
  */
 
@@ -583,102 +658,6 @@ static void run_crash_task(struct work_struct *ws)
 	 * TODO: trash cache blocks stochastically.
 	 */
 	free_all_pages_in_map(mdev->map0);
-}
-
-/**
- * unused
- */
-static inline void print_bvec_iter(struct bvec_iter *iter, const char *prefix)
-{
-	pr_info("%sbvec_iter: sector %" PRIu64 " size %u idx %u bvec_done %u\n"
-		, prefix
-		, (u64)iter->bi_sector
-		, iter->bi_size
-		, iter->bi_idx
-		, iter->bi_bvec_done);
-}
-
-/**
- * unused
- */
-static inline void print_bio_vec(struct bio_vec *bv, const char *prefix)
-{
-	pr_info("%sbio_vec: page %p len %u offset %u\n"
-		, prefix
-		, bv->bv_page
-		, bv->bv_len
-		, bv->bv_offset);
-}
-
-/**
- * unused
- */
-static inline void print_bio(struct bio *bio)
-{
-	struct bio_vec bv;
-	struct bvec_iter iter;
-
-	if (!bio) {
-		pr_info("bio null\n");
-		return;
-	}
-	pr_info("bio %p\n"
-		"  bi_next %p\n"
-		"  bi_flags %lx\n"
-		"  bi_rw %lx\n"
-		"  bi_phys_segments %u\n"
-		"  bi_seg_front_size %u\n"
-		"  bi_seg_back_size %u\n"
-		"  bi_remaining %d\n"
-		"  bi_end_io %p\n"
-		"  bi_private %p\n"
-		"  bi_vcnt %u\n"
-		"  bi_max_vecs %u\n"
-		"  bi_cnt %d\n"
-		, bio
-		, bio->bi_next
-		, bio->bi_flags
-		, bio->bi_rw
-		, bio->bi_phys_segments
-		, bio->bi_seg_front_size
-		, bio->bi_seg_back_size
-		, atomic_read(&bio->bi_remaining)
-		, bio->bi_end_io
-		, bio->bi_private
-		, bio->bi_vcnt
-		, bio->bi_max_vecs
-		, atomic_read(&bio->bi_cnt));
-	print_bvec_iter(&bio->bi_iter, "  cur ");
-
-	bio_for_each_segment(bv, bio, iter) {
-		print_bvec_iter(&iter, "  ");
-		print_bio_vec(&bv, "  ");
-	}
-}
-
-/**
- * unused
- */
-static struct bio_list split_bio_sectors(struct bio *bio)
-{
-	struct bio_list bl;
-	bio_list_init(&bl);
-	if (!bio_has_data(bio)) {
-		bio_list_add(&bl, bio);
-		return bl;
-	}
-	while (bio_sectors(bio) > 1) {
-		struct bio *split;
-	retry:
-		split = bio_split(bio, 1, GFP_NOIO, fs_bio_set);
-		if (!split) {
-			schedule();
-			goto retry;
-		}
-		bio_list_add(&bl, split);
-	}
-	bio_list_add(&bl, bio);
-	return bl;
 }
 
 static void bdevt_make_request(struct request_queue *q, struct bio *bio)
