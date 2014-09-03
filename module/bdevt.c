@@ -38,7 +38,8 @@ struct bdevt_dev
 
 	/* Ordered queue for serialized (single-threaded) tasks. */
 	struct workqueue_struct *wq;
-	struct work_struct worker;
+	struct work_struct bio_task;
+	struct work_struct crash_task;
 
 	/*
 	 * Temporarily inserted bio list.
@@ -48,6 +49,7 @@ struct bdevt_dev
 	struct bio_list bl;
 
 	atomic_t nr_running; /* for debug */
+	atomic_t state; /* for error/crash state. */
 
 	/*
 	 * The following data are accessed by only one thread.
@@ -88,6 +90,109 @@ module_param_named(is_put_log, is_put_log_, int, S_IRUGO | S_IWUSR);
 /*******************************************************************************
  * Static functions definition.
  *******************************************************************************/
+
+/*
+ * Utilities
+ */
+
+static void log_info_bio(u32 device_index, const char *type, const struct bio *bio)
+{
+	if (!is_put_log_)
+		return;
+
+	LOGi("%u: %s %" PRIu64 " %u\n", device_index, type
+			, (u64)bio->bi_iter.bi_sector, bio_sectors(bio));
+}
+
+static struct page *alloc_page_retry_forever(void)
+{
+	struct page *page = NULL;
+
+	while (!(page = alloc_page(GFP_NOIO | __GFP_ZERO)))
+		schedule();
+
+	return page;
+}
+
+static void map_add_retry_forever(struct map *map, u64 key, struct page *page)
+{
+	int ret;
+retry:
+	ret = map_add(map, key, (unsigned long)page, GFP_NOIO);
+	ASSERT(ret != -EEXIST);
+	if (ret != 0) {
+		schedule();
+		goto retry;
+	}
+}
+
+static void free_all_pages_in_map(struct map *map)
+{
+	struct map_cursor curt;
+
+	map_cursor_init(map, &curt);
+	map_cursor_begin(&curt);
+	map_cursor_next(&curt);
+	while (!map_cursor_is_end(&curt)) {
+		__free_page((struct page *)map_cursor_val(&curt));
+		map_cursor_del(&curt);
+	}
+	ASSERT(map_is_empty(map));
+}
+
+/*
+ * State utilities
+ */
+
+static const int allowed_for_error[] = {
+	BDEVT_STATE_NORMAL,
+	BDEVT_STATE_READ_ERROR,
+	BDEVT_STATE_WRITE_ERROR,
+	BDEVT_STATE_RW_ERROR,
+};
+
+static const int allowed_in_error[] = {
+	BDEVT_STATE_READ_ERROR,
+	BDEVT_STATE_WRITE_ERROR,
+	BDEVT_STATE_RW_ERROR,
+};
+
+static const int read_error_states[] = {
+	BDEVT_STATE_READ_ERROR,
+	BDEVT_STATE_RW_ERROR,
+	BDEVT_STATE_CRASHING,
+	BDEVT_STATE_CRASHED,
+};
+
+static const int write_error_states[] = {
+	BDEVT_STATE_WRITE_ERROR,
+	BDEVT_STATE_RW_ERROR,
+	BDEVT_STATE_CRASHING,
+	BDEVT_STATE_CRASHED,
+};
+
+static bool find_state(int state, const int *state_array, size_t size)
+{
+	size_t i;
+	for (i = 0; i < size; i++) {
+		if (state == state_array[i])
+			return true;
+	}
+	return false;
+}
+
+#define is_allowed_for_error(state)					\
+	find_state(state, allowed_for_error, sizeof(allowed_for_error)/sizeof(int))
+#define is_allowed_in_error(state)					\
+	find_state(state, allowed_in_error, sizeof(allowed_in_error)/sizeof(int))
+#define is_read_error(state)						\
+	find_state(state, read_error_states, sizeof(read_error_states)/sizeof(int))
+#define is_write_error(state)						\
+	find_state(state, write_error_states, sizeof(write_error_states)/sizeof(int))
+
+/*
+ * idr utilities
+ */
 
 static bool add_dev_to_idr(struct bdevt_dev *mdev)
 {
@@ -147,46 +252,23 @@ static int get_nr_dev_in_idr(void)
 	return nr;
 }
 
-static void invoke_worker(struct bdevt_dev *mdev)
-{
-	queue_work(mdev->wq, &mdev->worker);
-}
-
-static inline u64 sector_to_block(u64 sectors)
-{
-	do_div(sectors, PAGE_SIZE >> 9);
-	return sectors;
-}
-
-static inline u64 block_to_sector(u64 blks)
-{
-	return blks * (PAGE_SIZE >> 9);
-}
-
-static struct page *alloc_page_retry_forever(void)
-{
-	struct page *page = NULL;
-
-	while (!(page = alloc_page(GFP_NOIO | __GFP_ZERO)))
-		schedule();
-
-	return page;
-}
-
-/**
- * Thread-unsafe.
+/*
+ * For tasks
  */
-static void map_add_retry_forever(struct map *map, u64 key, struct page *page)
+
+static inline void invoke_bio_task(struct bdevt_dev *mdev)
 {
-	int ret;
-retry:
-	ret = map_add(map, key, (unsigned long)page, GFP_NOIO);
-	ASSERT(ret != -EEXIST);
-	if (ret != 0) {
-		schedule();
-		goto retry;
-	}
+	queue_work(mdev->wq, &mdev->bio_task);
 }
+
+static inline void invoke_crash_task(struct bdevt_dev *mdev)
+{
+	queue_work(mdev->wq, &mdev->crash_task);
+}
+
+/*
+ * For IO processing
+ */
 
 /**
  * Thread-unsafe.
@@ -238,15 +320,17 @@ static struct page *get_page_for_read(struct bdevt_dev *mdev, u64 blks)
 
 /**
  * Thread-unsafe.
+ *
+ * bio->bi_iter will be changed.
  */
-static void exec_bio(struct bdevt_dev *mdev, struct bio *bio)
+static void exec_bio_detail(struct bdevt_dev *mdev, struct bio *bio, bool is_write)
 {
 	struct page *page;
 	u64 blks;
 	u32 bio_off, page_off;
 	u8 *bio_buf, *page_buf;
-	bool is_write = bio->bi_rw & REQ_WRITE;
 
+	ASSERT(((bio->bi_rw & REQ_WRITE) != 0) == is_write);
 	ASSERT(!(bio->bi_rw & REQ_DISCARD));
 
 	while (bio_sectors(bio) > 0) {
@@ -281,15 +365,13 @@ static void exec_bio(struct bdevt_dev *mdev, struct bio *bio)
 static void discard_block(struct bdevt_dev *mdev, u64 blks)
 {
 	struct map_cursor curt;
-	struct page *page;
 	struct map *maps[2] = {mdev->map0, mdev->map1};
 	size_t i;
 
 	for (i = 0; i < 2; i++) {
 		map_cursor_init(maps[i], &curt);
 		if (map_cursor_search(&curt, blks, MAP_SEARCH_EQ)) {
-			page = (struct page *)map_cursor_val(&curt);
-			__free_page(page);
+			__free_page((struct page *)map_cursor_val(&curt));
 			map_cursor_del(&curt);
 		}
 	}
@@ -300,7 +382,6 @@ static void discard_block(struct bdevt_dev *mdev, u64 blks)
  */
 static void discard_bio(struct bdevt_dev *mdev, struct bio *bio)
 {
-	ASSERT(!(bio->bi_rw & REQ_FLUSH));
 	ASSERT(bio->bi_rw & REQ_WRITE);
 	ASSERT(bio->bi_rw & REQ_DISCARD);
 
@@ -325,40 +406,100 @@ static void discard_bio(struct bdevt_dev *mdev, struct bio *bio)
 }
 
 /**
- * Thread-unsafe.
+ * @cur cursor of map0.
+ *   The item will be deleted and the cur will indicates its next.
  */
-static void flush_all_blocks(struct bdevt_dev *mdev)
+static void flush_block_detail(struct map_cursor *cur, struct map *map1)
 {
-	while (!map_is_empty(mdev->map0)) {
-		struct map_cursor curt;
-		struct page *page0, *page1;
-		u64 blks;
+	struct page *page0, *page1;
+	u64 blks;
+	struct map_cursor curt;
 
-		map_cursor_init(mdev->map0, &curt);
-		map_cursor_begin(&curt);
-		map_cursor_next(&curt);
-		ASSERT(map_cursor_is_valid(&curt));
-		blks = map_cursor_key(&curt);
-		page0 = (struct page *)map_cursor_val(&curt);
-		map_cursor_del(&curt);
+	blks = map_cursor_key(cur);
+	page0 = (struct page *)map_cursor_val(cur);
+	LOG_("flush blks %" PRIu64 "\n", blks);
 
-		map_cursor_init(mdev->map1, &curt);
-		if (!map_cursor_search(&curt, blks, MAP_SEARCH_EQ))
-			BUG();
+	map_cursor_init(map1, &curt);
+	if (!map_cursor_search(&curt, blks, MAP_SEARCH_EQ))
+		BUG();
 
-		page1 = (struct page *)map_cursor_val(&curt);
+	page1 = (struct page *)map_cursor_val(&curt);
 
-		copy_highpage(page1, page0);
-	}
+	copy_highpage(page1, page0);
+	map_cursor_del(cur);
 }
 
-static void log_info_bio(u32 device_index, const char *type, const struct bio *bio)
+static void flush_all_blocks(struct bdevt_dev *mdev)
 {
-	if (!is_put_log_)
+	struct map_cursor curt;
+
+	LOG_("%u: flush all blocks\n", mdev->index);
+
+	map_cursor_init(mdev->map0, &curt);
+	map_cursor_begin(&curt);
+	map_cursor_next(&curt);
+
+	while (!map_cursor_is_end(&curt))
+		flush_block_detail(&curt, mdev->map1);
+
+	ASSERT(map_is_empty(mdev->map0));
+}
+
+/**
+ * Range [blks0, blks1).
+ */
+static void flush_blocks_in_range(struct bdevt_dev *mdev, u64 blks0, u64 blks1)
+{
+	struct map_cursor curt;
+
+	LOG_("%u: flush range [%" PRIu64 ", %" PRIu64 ")\n"
+		, mdev->index, blks0, blks1);
+
+	map_cursor_init(mdev->map0, &curt);
+	if (!map_cursor_search(&curt, blks0, MAP_SEARCH_GE))
 		return;
 
-	LOGi("%u: %s %" PRIu64 " %u\n", device_index, type
-			, (u64)bio->bi_iter.bi_sector, bio_sectors(bio));
+	while (!map_cursor_is_end(&curt) && map_cursor_key(&curt) < blks1)
+		flush_block_detail(&curt, mdev->map1);
+}
+
+/**
+ * Use pos,len instead of bio->bi_iter.bi_sector,bio_sectors(bio).
+ */
+static void flush_blocks_for_bio(struct bdevt_dev *mdev, struct bio *bio, sector_t pos, uint len)
+{
+	u64 blks0, blks1;
+	u32 rem;
+
+	ASSERT(len > 0);
+	LOG_("%u: flush bio %" PRIu64 " %u\n", mdev->index, (u64)pos, len);
+
+	blks0 = pos;
+	do_div(blks0, PAGE_SIZE >> 9);
+
+	blks1 = pos + len;
+	rem = do_div(blks1, PAGE_SIZE >> 9);
+	if (rem != 0)
+		blks1++;
+
+	ASSERT(blks0 < blks1);
+	flush_blocks_in_range(mdev, blks0, blks1);
+}
+
+static void exec_read_bio(struct bdevt_dev *mdev, struct bio *bio)
+{
+	exec_bio_detail(mdev, bio, false);
+}
+
+static void exec_write_bio(struct bdevt_dev *mdev, struct bio *bio)
+{
+	exec_bio_detail(mdev, bio, true);
+}
+
+static void backup_bio_pos_and_len(struct bio *bio, sector_t *posp, uint *lenp)
+{
+	*posp = bio->bi_iter.bi_sector;
+	*lenp = bio_sectors(bio);
 }
 
 /**
@@ -366,33 +507,55 @@ static void log_info_bio(u32 device_index, const char *type, const struct bio *b
  */
 static void process_bio(struct bdevt_dev *mdev, struct bio *bio)
 {
-	ASSERT(!(bio->bi_rw & REQ_FUA)); /* must be turned off */
+	const int state = atomic_read(&mdev->state);
+	int err = 0;
+
 	if (bio->bi_rw & REQ_WRITE) {
+		sector_t pos;
+		uint len;
+		if (is_write_error(state)) {
+			err = -EIO;
+			goto fin;
+		}
 		if (bio->bi_rw & REQ_FLUSH) {
 			log_info_bio(mdev->index, "flush", bio);
 			flush_all_blocks(mdev);
-			if (bio_sectors(bio) > 0) {
-				log_info_bio(mdev->index, "write", bio);
-				exec_bio(mdev, bio);
-			}
-		} else if (bio->bi_rw & REQ_DISCARD) {
+			if (bio_sectors(bio) == 0)
+				goto fin;
+		}
+		backup_bio_pos_and_len(bio, &pos, &len);
+		if (bio->bi_rw & REQ_DISCARD) {
 			log_info_bio(mdev->index, "discard", bio);
 			discard_bio(mdev, bio);
 		} else {
 			log_info_bio(mdev->index, "write", bio);
-			exec_bio(mdev, bio);
+			exec_write_bio(mdev, bio);
 		}
+		if (bio->bi_rw & REQ_FUA)
+			flush_blocks_for_bio(mdev, bio, pos, len);
 	} else {
+		if (is_read_error(state)) {
+			err = -EIO;
+			goto fin;
+		}
 		log_info_bio(mdev->index, "read", bio);
-		exec_bio(mdev, bio);
+		exec_read_bio(mdev, bio);
 	}
-	bio_endio(bio, 0);
+fin:
+	bio_endio(bio, err);
 	atomic_dec(&mdev->nr_running);
 }
 
-static void do_work(struct work_struct *ws)
+/*
+ * For tasks.
+ */
+
+/**
+ * run_bio_task() and run_crash_task() are serialized by each ordered workqueue.
+ */
+static void run_bio_task(struct work_struct *ws)
 {
-	struct bdevt_dev *mdev = container_of(ws, struct bdevt_dev, worker);
+	struct bdevt_dev *mdev = container_of(ws, struct bdevt_dev, bio_task);
 	struct bio_list bl;
 	struct bio *bio;
 
@@ -407,6 +570,24 @@ static void do_work(struct work_struct *ws)
 		process_bio(mdev, bio);
 }
 
+/**
+ * run_bio_task() and run_crash_task() are serialized by each ordered workqueue.
+ */
+static void run_crash_task(struct work_struct *ws)
+{
+	struct bdevt_dev *mdev = container_of(ws, struct bdevt_dev, crash_task);
+
+	/*
+	 * Currently we trash all data in the cache layer.
+	 *
+	 * TODO: trash cache blocks stochastically.
+	 */
+	free_all_pages_in_map(mdev->map0);
+}
+
+/**
+ * unused
+ */
 static inline void print_bvec_iter(struct bvec_iter *iter, const char *prefix)
 {
 	pr_info("%sbvec_iter: sector %" PRIu64 " size %u idx %u bvec_done %u\n"
@@ -417,6 +598,9 @@ static inline void print_bvec_iter(struct bvec_iter *iter, const char *prefix)
 		, iter->bi_bvec_done);
 }
 
+/**
+ * unused
+ */
 static inline void print_bio_vec(struct bio_vec *bv, const char *prefix)
 {
 	pr_info("%sbio_vec: page %p len %u offset %u\n"
@@ -426,6 +610,9 @@ static inline void print_bio_vec(struct bio_vec *bv, const char *prefix)
 		, bv->bv_offset);
 }
 
+/**
+ * unused
+ */
 static inline void print_bio(struct bio *bio)
 {
 	struct bio_vec bv;
@@ -469,6 +656,9 @@ static inline void print_bio(struct bio *bio)
 	}
 }
 
+/**
+ * unused
+ */
 static struct bio_list split_bio_sectors(struct bio *bio)
 {
 	struct bio_list bl;
@@ -501,12 +691,12 @@ static void bdevt_make_request(struct request_queue *q, struct bio *bio)
 	bio_list_add(&mdev->bl, bio);
 	spin_unlock(&mdev->lock);
 
-	invoke_worker(mdev);
+	invoke_bio_task(mdev);
 }
 
-/*******************************************************************************
+/*
  * Ioctl for /dev/bdevtX
- *******************************************************************************/
+ */
 
 static void del_dev(struct bdevt_dev *mdev);
 
@@ -519,26 +709,96 @@ static int ioctl_stop_dev(struct bdevt_dev *mdev, struct bdevt_ctl *ctl)
 
 static int ioctl_make_crash(struct bdevt_dev *mdev, struct bdevt_ctl *ctl)
 {
-	/* QQQ */
-	return -EFAULT;
+	int prev_st = atomic_read(&mdev->state);
+	int new_st = BDEVT_STATE_CRASHING;
+	int st;
+
+	if (!is_allowed_for_error(prev_st)) {
+		LOGe("%u: bad state prev: %d\n", mdev->index, prev_st);
+		return -EFAULT;
+	}
+	st = atomic_cmpxchg(&mdev->state, prev_st, new_st);
+	if (prev_st != st) {
+		LOGe("%u: make_crash: state change to crashing failed: "
+			"expected %d prev %d.\n"
+			, mdev->index, prev_st, st);
+		return -EFAULT;
+	}
+	LOGi("%u: state change: crashing", mdev->index);
+
+	invoke_crash_task(mdev);
+	flush_workqueue(mdev->wq);
+
+	prev_st = BDEVT_STATE_CRASHING;
+	new_st = BDEVT_STATE_CRASHED;
+	st = atomic_cmpxchg(&mdev->state, prev_st, new_st);
+	if (prev_st != st) {
+		LOGe("%u: make_crash: state change to crashed failed: "
+			"expected %d prev %d\n"
+			, mdev->index, prev_st, st);
+		atomic_set(&mdev->state, 0); /* reset */
+		return -EFAULT;
+	}
+	LOGi("%u: state change: crashed", mdev->index);
+	return 0;
 }
 
 static int ioctl_recover_crash(struct bdevt_dev *mdev, struct bdevt_ctl *ctl)
 {
-	/* QQQ */
-	return -EFAULT;
+	const int prev_st = BDEVT_STATE_CRASHED;
+	const int new_st = BDEVT_STATE_NORMAL;
+	int st;
+
+	st = atomic_cmpxchg(&mdev->state, prev_st, new_st);
+	if (st != prev_st) {
+		LOGe("%u: recover_crash: state change failed: "
+			"expected %d prev %d.\n"
+			, mdev->index, prev_st, st);
+		return -EFAULT;
+	}
+	return 0;
 }
 
 static int ioctl_make_error(struct bdevt_dev *mdev, struct bdevt_ctl *ctl)
 {
-	/* QQQ */
-	return -EFAULT;
+	const int prev_st = atomic_read(&mdev->state);
+	const int new_st = ctl->val_int;
+	int st;
+
+	if (!is_allowed_for_error(prev_st) || !is_allowed_in_error(new_st)) {
+		LOGe("%u: make_error: bad state prev %d new %d.\n"
+			, mdev->index, prev_st, new_st);
+		return -EFAULT;
+	}
+	st = atomic_cmpxchg(&mdev->state, prev_st, new_st);
+	if (st != prev_st) {
+		LOGe("%u: make_error: state change failed: "
+			"expected %d prev %d new %d\n"
+			, mdev->index, prev_st, st, new_st);
+		return -EFAULT;
+	}
+	return 0;
 }
 
 static int ioctl_recover_error(struct bdevt_dev *mdev, struct bdevt_ctl *ctl)
 {
-	/* QQQ */
-	return -EFAULT;
+	const int prev_st = atomic_read(&mdev->state);
+	const int new_st = BDEVT_STATE_NORMAL;
+	int st;
+
+	if (!is_allowed_in_error(prev_st)) {
+		LOGe("%u: recover_error: bad state prev %d.\n"
+			, mdev->index, prev_st);
+		return -EFAULT;
+	}
+	st = atomic_cmpxchg(&mdev->state, prev_st, new_st);
+	if (st != prev_st) {
+		LOGe("%u: recover_error: state change failed: "
+			"expected %d prev %d\n"
+			, mdev->index, prev_st, st);
+		return -EFAULT;
+	}
+	return 0;
 }
 
 static int dispatch_dev_ioctl(struct bdevt_dev *mdev, struct bdevt_ctl *ctl)
@@ -564,9 +824,9 @@ static int dispatch_dev_ioctl(struct bdevt_dev *mdev, struct bdevt_ctl *ctl)
 	return -ENOTTY;
 }
 
-/*******************************************************************************
+/*
  * Ioctl utility functions.
- *******************************************************************************/
+ */
 
 static struct bdevt_ctl *bdevt_get_ctl(void __user *userctl, gfp_t gfp_mask)
 {
@@ -602,9 +862,9 @@ static bool bdevt_put_ctl(void __user *userctl, struct bdevt_ctl *ctl)
 	return ret;
 }
 
-/*******************************************************************************
- * For /dev/bdevtX
- *******************************************************************************/
+/*
+ * For /dev/bdevtX operations.
+ */
 
 static int bdevt_dev_open(struct block_device *bdev, fmode_t mode)
 {
@@ -639,10 +899,6 @@ static int bdevt_dev_ioctl(struct block_device *bdev, fmode_t mode,
 	return ret;
 }
 
-/*******************************************************************************
- * Static variables definition.
- *******************************************************************************/
-
 static struct block_device_operations bdevt_devops_ = {
 	.owner		 = THIS_MODULE,
 	.open		 = bdevt_dev_open,
@@ -650,9 +906,9 @@ static struct block_device_operations bdevt_devops_ = {
 	.ioctl		 = bdevt_dev_ioctl
 };
 
-/*******************************************************************************
- * Static functions definition.
- *******************************************************************************/
+/*
+ * For controlling devices
+ */
 
 static struct bdevt_dev *create_bdevt_dev(void)
 {
@@ -679,6 +935,7 @@ static struct bdevt_dev *create_bdevt_dev(void)
 	spin_lock_init(&mdev->lock);
 	bio_list_init(&mdev->bl);
 	atomic_set(&mdev->nr_running, 0);
+	atomic_set(&mdev->state, 0);
 	mdev->index = (u32)(-1);
 
 	return mdev;
@@ -692,20 +949,6 @@ error1:
 error0:
 	kfree(mdev);
 	return NULL;
-}
-
-static void free_all_pages_in_map(struct map *map)
-{
-	struct map_cursor curt;
-
-	map_cursor_init(map, &curt);
-	map_cursor_begin(&curt);
-	map_cursor_next(&curt);
-	while (!map_cursor_is_end(&curt)) {
-		__free_page((struct page *)map_cursor_val(&curt));
-		map_cursor_del(&curt);
-	}
-	ASSERT(map_is_empty(map));
 }
 
 static void destroy_bdevt_dev(struct bdevt_dev *mdev)
@@ -728,12 +971,12 @@ static void del_dev(struct bdevt_dev *mdev)
 	del_gendisk(mdev->disk);
 
 	/* Complete all pending IOs. */
-	invoke_worker(mdev);
+	invoke_bio_task(mdev);
 	flush_workqueue(mdev->wq);
 
 	ASSERT(bio_list_empty(&mdev->bl));
 	nr_running = atomic_read(&mdev->nr_running);
-	LOGi("nr_running: %d\n", nr_running);
+	LOGi("%u: nr_running: %d\n", mdev->index, nr_running);
 	ASSERT(nr_running == 0);
 
 	destroy_workqueue(mdev->wq);
@@ -774,7 +1017,8 @@ static bool add_dev(u64 size_lb, u32 *minorp)
 		LOGe("unable to allocate workqueue.\n");
 		goto error2;
 	}
-	INIT_WORK(&mdev->worker, do_work);
+	INIT_WORK(&mdev->bio_task, run_bio_task);
+	INIT_WORK(&mdev->crash_task, run_crash_task);
 
 	if (!add_dev_to_idr(mdev))
 		goto error3;
@@ -787,7 +1031,7 @@ static bool add_dev(u64 size_lb, u32 *minorp)
 	q->limits.max_discard_sectors = UINT_MAX;
 	q->limits.discard_zeroes_data = 1;
 	queue_flag_set_unlocked(QUEUE_FLAG_DISCARD, q);
-	blk_queue_flush(q, REQ_FLUSH);
+	blk_queue_flush(q, REQ_FLUSH | REQ_FUA);
 	blk_queue_flush_queueable(q, true);
 
 	set_capacity(disk, size_lb);
@@ -836,9 +1080,9 @@ static void init_globals(void)
 	idr_init(&dev_idr_);
 }
 
-/*******************************************************************************
+/*
  * For /dev/bdevt_ctl
- *******************************************************************************/
+ */
 
 static int ioctl_start_dev(struct bdevt_ctl *ctl)
 {
@@ -927,6 +1171,10 @@ static const struct file_operations ctl_fops_ = {
 	.owner = THIS_MODULE,
 };
 
+/*
+ * Control device.
+ */
+
 static struct miscdevice bdevt_misc_ = {
 	.minor = MISC_DYNAMIC_MINOR,
 	.name  = BDEVT_NAME,
@@ -934,9 +1182,9 @@ static struct miscdevice bdevt_misc_ = {
 	.fops = &ctl_fops_,
 };
 
-/*******************************************************************************
+/*
  * Init/exit functions definition.
- *******************************************************************************/
+ */
 
 static int __init bdevt_init(void)
 {

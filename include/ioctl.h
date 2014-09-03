@@ -113,9 +113,9 @@ enum {
 	 * Make the device the state that IOs will fail.
 	 *
 	 * INPUT: ctl->val_int
-	 *   0: read will fail.
-	 *   1: write will fail.
-	 *   2: both will fail.
+	 *   BDEVT_STATE_READ_ERROR or
+	 *   BDEVT_STATE_WRITE_ERROR or
+	 *   BDEVT_STATE_RW_ERROR.
 	 * OUTPUT: None.
 	 * RETURN: 0 in success, or -EFAULT.
 	 */
@@ -130,6 +130,13 @@ enum {
 	 */
 	BDEVT_IOCTL_RECOVER_ERROR,
 };
+
+#define BDEVT_STATE_NORMAL            0
+#define BDEVT_STATE_READ_ERROR        1
+#define BDEVT_STATE_WRITE_ERROR       2
+#define BDEVT_STATE_RW_ERROR          3
+#define BDEVT_STATE_CRASHING          4
+#define BDEVT_STATE_CRASHED           5
 
 #ifdef __cplusplus
 }
