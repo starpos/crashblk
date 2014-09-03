@@ -125,9 +125,6 @@ void doDelete(const StrVec &params)
     invokeIoctlWithoutParam(devPath, ctl, BDEVT_IOCTL_STOP_DEV);
 }
 
-#define NYI(func) \
-    throw Exception("not yet implemented") << func
-
 void doNumDev(const StrVec &params)
 {
     const std::string &devPath = getDevPath(params);
