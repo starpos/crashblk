@@ -46,6 +46,8 @@ struct bdevt_dev
 	spinlock_t lock;
 	struct bio_list bl;
 
+	atomic_t nr_running; /* for debug */
+
 	/*
 	 * The following data are accessed by only one thread.
 	 * using ordered workqueue.
@@ -61,8 +63,9 @@ struct bdevt_dev
  * Module variable definitions.
  *******************************************************************************/
 
-static int major_;
+static int is_put_log_ = false;
 
+static int major_;
 static struct list_head dev_list_;
 static struct mutex dev_lock_;
 static int dev_indexes_ = 0;
@@ -71,6 +74,8 @@ struct treemap_memory_manager mmgr_;
 /*******************************************************************************
  * Module parameter definitions.
  *******************************************************************************/
+
+module_param_named(is_put_log, is_put_log_, int, S_IRUGO | S_IWUSR);
 
 /*******************************************************************************
  * Macro definitions.
@@ -288,26 +293,42 @@ static void flush_all_blocks(struct bdevt_dev *mdev)
 	}
 }
 
+static void log_info_bio(u32 device_index, const char *type, const struct bio *bio)
+{
+	if (!is_put_log_)
+		return;
+
+	LOGi("%u: %s %" PRIu64 " %u\n", device_index, type
+			, (u64)bio->bi_iter.bi_sector, bio_sectors(bio));
+}
+
 /**
  * Thread-unsafe.
  */
 static void process_bio(struct bdevt_dev *mdev, struct bio *bio)
 {
+	ASSERT(!(bio->bi_rw & REQ_FUA)); /* must be turned off */
 	if (bio->bi_rw & REQ_WRITE) {
 		if (bio->bi_rw & REQ_FLUSH) {
-			LOGd("%u: flush", mdev->index);
+			LOGi("%u: flush\n", mdev->index);
 			flush_all_blocks(mdev);
-			if (bio_sectors(bio) > 0)
+			if (bio_sectors(bio) > 0) {
+				log_info_bio(mdev->index, "write", bio);
 				exec_bio(mdev, bio);
+			}
 		} else if (bio->bi_rw & REQ_DISCARD) {
+			log_info_bio(mdev->index, "discard", bio);
 			discard_bio(mdev, bio);
 		} else {
+			log_info_bio(mdev->index, "write", bio);
 			exec_bio(mdev, bio);
 		}
 	} else {
+		log_info_bio(mdev->index, "read", bio);
 		exec_bio(mdev, bio);
 	}
 	bio_endio(bio, 0);
+	atomic_dec(&mdev->nr_running);
 }
 
 static void do_work(struct work_struct *ws)
@@ -414,6 +435,8 @@ static struct bio_list split_bio_sectors(struct bio *bio)
 static void bdevt_queue_bio(struct request_queue *q, struct bio *bio)
 {
 	struct bdevt_dev *mdev = q->queuedata;
+
+	atomic_inc(&mdev->nr_running);
 
 	spin_lock(&mdev->lock);
 	bio_list_add(&mdev->bl, bio);
@@ -599,17 +622,16 @@ static struct bdevt_dev *create_bdevt_dev(void)
 
 	spin_lock_init(&mdev->lock);
 	bio_list_init(&mdev->bl);
+	atomic_set(&mdev->nr_running, 0);
 
 	return mdev;
 
 #if 0
 error2:
 	map_destroy(mdev->map1);
-	mdev->map1 = NULL;
 #endif
 error1:
 	map_destroy(mdev->map0);
-	mdev->map0 = NULL;
 error0:
 	kfree(mdev);
 	return NULL;
@@ -644,12 +666,18 @@ static void destroy_bdevt_dev(struct bdevt_dev *mdev)
 static void del_dev(struct bdevt_dev *mdev)
 {
 	const u32 minor = mdev->index;
+	int nr_running;
 
 	del_gendisk(mdev->disk);
 
 	/* Complete all pending IOs. */
 	invoke_worker(mdev);
 	flush_workqueue(mdev->wq);
+
+	ASSERT(bio_list_empty(&mdev->bl));
+	nr_running = atomic_read(&mdev->nr_running);
+	LOGi("nr_running: %d\n", nr_running);
+	ASSERT(nr_running == 0);
 
 	destroy_workqueue(mdev->wq);
 	blk_cleanup_queue(mdev->q);
@@ -694,6 +722,7 @@ static bool add_dev(u64 size_lb, u32 *minorp)
 	mutex_lock(&dev_lock_);
 	list_add_tail(&mdev->list, &dev_list_);
 	mdev->index = dev_indexes_++;
+
 	mutex_unlock(&dev_lock_);
 
 	blk_queue_logical_block_size(q, LBS);
