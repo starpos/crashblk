@@ -1,7 +1,7 @@
 # bdevt
 
-This is memory block device for IO errors and crash test,
-emulating read/write IO error and crash/recovery.
+This is memory block device driver for IO errors and crash test,
+emulating read/write IO error and device crash (or sudden shutdown).
 
 ## License
 
