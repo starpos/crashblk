@@ -369,7 +369,7 @@ static void process_bio(struct bdevt_dev *mdev, struct bio *bio)
 	ASSERT(!(bio->bi_rw & REQ_FUA)); /* must be turned off */
 	if (bio->bi_rw & REQ_WRITE) {
 		if (bio->bi_rw & REQ_FLUSH) {
-			LOGi("%u: flush\n", mdev->index);
+			log_info_bio(mdev->index, "flush", bio);
 			flush_all_blocks(mdev);
 			if (bio_sectors(bio) > 0) {
 				log_info_bio(mdev->index, "write", bio);
