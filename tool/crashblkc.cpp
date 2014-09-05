@@ -1,5 +1,5 @@
 /**
- * bdevtc.cpp - control bdevt devices.
+ * crashblk.cpp - control crashblk devices.
  *
  * (C) 2014, Cybozu Labs, Inc.
  * @author HOSHINO Takashi <hoshino@labs.cybozu.co.jp>
@@ -20,7 +20,7 @@
 using StrVec = std::vector<std::string>;
 using Ss = std::stringstream;
 
-const char * const ctlPath = "/dev/bdevt_ctl";
+const char * const ctlPath = "/dev/crashblk_ctl";
 
 template <typename T>
 void unused(T &) {}
@@ -81,17 +81,17 @@ class File
     }
 };
 
-void invokeIoctl(const std::string &path, struct bdevt_ctl &ctl)
+void invokeIoctl(const std::string &path, struct crashblk_ctl &ctl)
 {
     File file;
     file.open(path);
-    if (::ioctl(file.fd(), BDEVT_IOCTL, &ctl) < 0) {
+    if (::ioctl(file.fd(), CRASHBLK_IOCTL, &ctl) < 0) {
         throw Exception("ioctl failed.");
     }
     file.close();
 }
 
-void invokeIoctlWithoutParam(const std::string &path, struct bdevt_ctl &ctl, int command)
+void invokeIoctlWithoutParam(const std::string &path, struct crashblk_ctl &ctl, int command)
 {
     ::memset(&ctl, 0, sizeof(ctl));
     ctl.command = command;
@@ -109,8 +109,8 @@ void doCreate(const StrVec &params)
     if (params.empty()) throw Exception("specify size.");
     const uint64_t sizeLb = parseSize(params[0]) >> 9;
 
-    struct bdevt_ctl ctl = {
-        .command = BDEVT_IOCTL_START_DEV,
+    struct crashblk_ctl ctl = {
+        .command = CRASHBLK_IOCTL_START_DEV,
         .val_u64 = sizeLb,
     };
     invokeIoctl(ctlPath, ctl);
@@ -121,23 +121,23 @@ void doDelete(const StrVec &params)
 {
     const std::string &devPath = getDevPath(params);
 
-    struct bdevt_ctl ctl;
-    invokeIoctlWithoutParam(devPath, ctl, BDEVT_IOCTL_STOP_DEV);
+    struct crashblk_ctl ctl;
+    invokeIoctlWithoutParam(devPath, ctl, CRASHBLK_IOCTL_STOP_DEV);
 }
 
 void doNumDev(const StrVec &params)
 {
     const std::string &devPath = getDevPath(params);
 
-    struct bdevt_ctl ctl;
-    invokeIoctlWithoutParam(devPath, ctl, BDEVT_IOCTL_NUM_OF_DEV);
+    struct crashblk_ctl ctl;
+    invokeIoctlWithoutParam(devPath, ctl, CRASHBLK_IOCTL_NUM_OF_DEV);
     std::cout << ctl.val_int << std::endl; // number of devices.
 }
 
 void doGetMajor(const StrVec &)
 {
-    struct bdevt_ctl ctl;
-    invokeIoctlWithoutParam(ctlPath, ctl, BDEVT_IOCTL_GET_MAJOR);
+    struct crashblk_ctl ctl;
+    invokeIoctlWithoutParam(ctlPath, ctl, CRASHBLK_IOCTL_GET_MAJOR);
     std::cout << ctl.val_int << std::endl; // device major id.
 }
 
@@ -147,19 +147,19 @@ void doMakeError(const StrVec &params)
 
     int state;
     if (params.size() < 2) {
-        state = BDEVT_STATE_RW_ERROR;
+        state = CRASHBLK_STATE_RW_ERROR;
     } else if (params[1] == "rw") {
-        state = BDEVT_STATE_RW_ERROR;
+        state = CRASHBLK_STATE_RW_ERROR;
     } else if (params[1] == "r") {
-        state = BDEVT_STATE_READ_ERROR;
+        state = CRASHBLK_STATE_READ_ERROR;
     } else if (params[1] == "w") {
-        state = BDEVT_STATE_WRITE_ERROR;
+        state = CRASHBLK_STATE_WRITE_ERROR;
     } else {
         throw Exception("bad mode") << params[1];
     }
 
-    struct bdevt_ctl ctl = {
-        .command = BDEVT_IOCTL_MAKE_ERROR,
+    struct crashblk_ctl ctl = {
+        .command = CRASHBLK_IOCTL_MAKE_ERROR,
         .val_int = state,
     };
     invokeIoctl(devPath, ctl);
@@ -169,24 +169,24 @@ void doRecoverError(const StrVec &params)
 {
     const std::string &devPath = getDevPath(params);
 
-    struct bdevt_ctl ctl;
-    invokeIoctlWithoutParam(devPath, ctl, BDEVT_IOCTL_RECOVER_ERROR);
+    struct crashblk_ctl ctl;
+    invokeIoctlWithoutParam(devPath, ctl, CRASHBLK_IOCTL_RECOVER_ERROR);
 }
 
 void doMakeCrash(const StrVec &params)
 {
     const std::string &devPath = getDevPath(params);
 
-    struct bdevt_ctl ctl;
-    invokeIoctlWithoutParam(devPath, ctl, BDEVT_IOCTL_MAKE_CRASH);
+    struct crashblk_ctl ctl;
+    invokeIoctlWithoutParam(devPath, ctl, CRASHBLK_IOCTL_MAKE_CRASH);
 }
 
 void doRecoverCrash(const StrVec &params)
 {
     const std::string &devPath = getDevPath(params);
 
-    struct bdevt_ctl ctl;
-    invokeIoctlWithoutParam(devPath, ctl, BDEVT_IOCTL_RECOVER_CRASH);
+    struct crashblk_ctl ctl;
+    invokeIoctlWithoutParam(devPath, ctl, CRASHBLK_IOCTL_RECOVER_CRASH);
 }
 
 void dispatch(int argc, char *argv[])

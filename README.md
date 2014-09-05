@@ -1,4 +1,4 @@
-# bdevt
+# crashblk
 
 This is memory block device driver for IO errors and crash test,
 emulating read/write IO error and device crash (or sudden shutdown).
@@ -12,9 +12,9 @@ GPLv2 or later.
 ### Kernel driver
 
 ```
-> cd bdevt.git/module
+> cd crashblk.git/module
 > make
-> sudo insmod bdevt-mod.ko
+> sudo insmod crashblk-mod.ko
 ```
 
 Use `KERNELDIR`, `DEBUG` make options to customize your build.
@@ -22,9 +22,9 @@ Use `KERNELDIR`, `DEBUG` make options to customize your build.
 ### Controller
 
 ```
-> cd bdevt.git/tool
+> cd crashblk.git/tool
 > make
-> sudo cp -a bdevtc /usr/local/bin/
+> sudo cp -a crashblkc /usr/local/bin/
 ```
 
 Use `DEBUG` make option to customize your build.
@@ -33,26 +33,26 @@ Use `DEBUG` make option to customize your build.
 
 To show command list, type as follows:
 ```
-> bdevtc
+> crashblkc
 ```
 
 Create a device with 1GiB:
 ```
-> sudo bdevtc create 1G
+> sudo crashblkc create 1G
 0
 ```
 
-You will get `/dev/bdevt0` of 1GiB size.
+You will get `/dev/crashblk0` of 1GiB size.
 Internally the module will use 2GiB+ memory.
 
 Delete a device:
 ```
-> sudo bdevtc delete /dev/bdevt0
+> sudo crashblkc delete /dev/crashblk0
 ```
 
 Make a device in error state:
 ```
-> sudo bdevtc make-error /dev/bdevt0 MODE
+> sudo crashblkc make-error /dev/crashblk0 MODE
 ```
 You can specify `MODE` as `r`, `w`, or `rw`.
 
@@ -64,19 +64,19 @@ You can specify `MODE` as `r`, `w`, or `rw`.
 
 Recover from error state:
 ```
-> sudo bdevtc recover-error /dev/bdevt0
+> sudo crashblkc recover-error /dev/crashblk0
 ```
 
 Make a device in crash state:
 ```
-> sudo bdevtc make-crash /dev/bdevt0
+> sudo crashblkc make-crash /dev/crashblk0
 ```
 
 Not flushed data will be lost.
 
 Recover a device from crash state:
 ```
-> sudo bdevtc recover-crash /dev/bdevt0
+> sudo crashblkc recover-crash /dev/crashblk0
 ```
 
 Of course the lost data will not recovered.

@@ -15,7 +15,7 @@ CXXFLAGS = -std=c++11 $(CFLAGS)
 LDFLAGS =
 LDLIBS =
 
-BINARIES = bdevtc
+BINARIES = crashblkc
 DEPENDS = $(patsubst %,%.depend,$(BINARIES))
 
 all: build

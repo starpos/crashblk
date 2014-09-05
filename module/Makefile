@@ -1,9 +1,12 @@
 # Debug options. Choose one of the followings.
 DEBUG = 0
 DYNAMIC_DEBUG = 0
+
 # You can specify the following parameters.
-ASSERT = 0 # enable ASSERT even with relase build.
-PERF = 0 # enable performacne analysis of each bio wrapper.
+# enable ASSERT even with relase build.
+ASSERT = 0 
+# enable performacne analysis of each bio wrapper.
+PERF = 0
 
 # Add your debugging flag (or not) to CFLAGS
 ifeq ($(DYNAMIC_DEBUG),1)
@@ -28,9 +31,9 @@ EXTRA_CFLAGS += -I$(obj)/../include/ -I$(obj)
 ifneq ($(KERNELRELEASE),)
 # call from kernel build system
 
-bdevt-mod-objs := treemap.o bdevt.o
+crashblk-mod-objs := treemap.o crashblk.o
 
-obj-m := bdevt-mod.o
+obj-m := crashblk-mod.o
 
 else
 

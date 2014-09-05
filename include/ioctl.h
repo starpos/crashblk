@@ -1,8 +1,8 @@
 /**
- * ioctl.h - data structure definictions for bdevt ioctl interface.
+ * ioctl.h - data structure definictions for clashblk ioctl interface.
  */
-#ifndef BDEVT_IOCTL_H
-#define BDEVT_IOCTL_H
+#ifndef CRASHBLK_IOCTL_H
+#define CRASHBLK_IOCTL_H
 
 #ifdef __KERNEL__
 #include <linux/kernel.h>
@@ -19,9 +19,9 @@ extern "C" {
 /**
  * If you want to assign device minor automatically, specify this.
  */
-#define BDEVT_DYNAMIC_MINOR (-1U)
+#define CRASHBLK_DYNAMIC_MINOR (-1U)
 
-struct bdevt_ctl {
+struct crashblk_ctl {
 	/* Command id. */
 	int command;
 
@@ -36,29 +36,29 @@ struct bdevt_ctl {
 /**
  * Ioctl command id/cmd.
  */
-#define BDEVT_IOCTL_ID 0xfe
-#define BDEVT_IOCTL_CMD 3
+#define CRASHBLK_IOCTL_ID 0xfe
+#define CRASHBLK_IOCTL_CMD 3
 
-#define BDEVT_IOCTL _IOWR(BDEVT_IOCTL_ID, BDEVT_IOCTL_CMD, struct bdevt_ctl)
+#define CRASHBLK_IOCTL _IOWR(CRASHBLK_IOCTL_ID, CRASHBLK_IOCTL_CMD, struct crashblk_ctl)
 
 /**
- * For bdevt_ctl.command.
+ * For crashblk_ctl.command.
  */
 enum {
-	BDEVT_IOCTL_DUMMY = 0,
+	CRASHBLK_IOCTL_DUMMY = 0,
 
 	/****************************************
-	 * The target is /dev/bdevt_ctl
+	 * The target is /dev/crashblk_ctl
 	 ****************************************/
 
 	/*
-	 * Start a bdevt device.
+	 * Start a crashblk device.
 	 *
 	 * INPUT: ctl->val_u64 as device size [logical block].
 	 * OUTPUT: ctl->val_u32 as minor id.
 	 * RETURN: 0 in success, or -EFAULT.
 	 */
-	BDEVT_IOCTL_START_DEV,
+	CRASHBLK_IOCTL_START_DEV,
 
 	/*
 	 * Get major id.
@@ -67,29 +67,29 @@ enum {
 	 * OUTPUT: ctl->val_int as major id.
 	 * RETURN: 0 in success, or -EFAULT.
 	 */
-	BDEVT_IOCTL_GET_MAJOR,
+	CRASHBLK_IOCTL_GET_MAJOR,
 
 	/*
-	 * Get number of bdevt devices.
+	 * Get number of crashblk devices.
 	 *
 	 * INPUT: None.
-	 * OUTPUT: ctl->val_int as number of bdevt devices.
+	 * OUTPUT: ctl->val_int as number of crashblk devices.
 	 * RETURN: 0 in success, or -EFAULT.
 	 */
-	BDEVT_IOCTL_NUM_OF_DEV,
+	CRASHBLK_IOCTL_NUM_OF_DEV,
 
 	/****************************************
-	 * The targets are bdevt devices.
+	 * The targets are crashblk devices.
 	 ****************************************/
 
 	/*
-	 * Stop a bdevt device.
+	 * Stop a crashblk device.
 	 *
 	 * INPUT: None.
 	 * OUTPUT: None.
 	 * RETURN: 0 in success, or -EFAULT.
 	 */
-	BDEVT_IOCTL_STOP_DEV,
+	CRASHBLK_IOCTL_STOP_DEV,
 
 	/*
 	 * Make the device crash.
@@ -98,7 +98,7 @@ enum {
 	 * OUTPUT: None.
 	 * RETURN: 0 in success, or -EFAULT.
 	 */
-	BDEVT_IOCTL_MAKE_CRASH,
+	CRASHBLK_IOCTL_MAKE_CRASH,
 
 	/*
 	 * Recover the device from crash.
@@ -107,19 +107,19 @@ enum {
 	 * OUTPUT: None.
 	 * RETURN: 0 in success, or -EFAULT.
 	 */
-	BDEVT_IOCTL_RECOVER_CRASH,
+	CRASHBLK_IOCTL_RECOVER_CRASH,
 
 	/*
 	 * Make the device the state that IOs will fail.
 	 *
 	 * INPUT: ctl->val_int
-	 *   BDEVT_STATE_READ_ERROR or
-	 *   BDEVT_STATE_WRITE_ERROR or
-	 *   BDEVT_STATE_RW_ERROR.
+	 *   CRASHBLK_STATE_READ_ERROR or
+	 *   CRASHBLK_STATE_WRITE_ERROR or
+	 *   CRASHBLK_STATE_RW_ERROR.
 	 * OUTPUT: None.
 	 * RETURN: 0 in success, or -EFAULT.
 	 */
-	BDEVT_IOCTL_MAKE_ERROR,
+	CRASHBLK_IOCTL_MAKE_ERROR,
 
 	/*
 	 * Recover the device from error.
@@ -128,18 +128,18 @@ enum {
 	 * OUTPUT: None.
 	 * RETURN: 0 in success, or -EFAULT.
 	 */
-	BDEVT_IOCTL_RECOVER_ERROR,
+	CRASHBLK_IOCTL_RECOVER_ERROR,
 };
 
-#define BDEVT_STATE_NORMAL            0
-#define BDEVT_STATE_READ_ERROR        1
-#define BDEVT_STATE_WRITE_ERROR       2
-#define BDEVT_STATE_RW_ERROR          3
-#define BDEVT_STATE_CRASHING          4
-#define BDEVT_STATE_CRASHED           5
+#define CRASHBLK_STATE_NORMAL            0
+#define CRASHBLK_STATE_READ_ERROR        1
+#define CRASHBLK_STATE_WRITE_ERROR       2
+#define CRASHBLK_STATE_RW_ERROR          3
+#define CRASHBLK_STATE_CRASHING          4
+#define CRASHBLK_STATE_CRASHED           5
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif /* BDEVT_IOCTL_H */
+#endif /* CRASHBLK_IOCTL_H */

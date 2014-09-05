@@ -1,5 +1,5 @@
 /**
- * bdevt.c - a memory block device driver for test.
+ * crashblk.c - a memory block device driver for crash test.
  *
  * (C) 2014, Cybozu Labs, Inc.
  * @author HOSHINO Takashi <hoshino@labs.cybozu.co.jp>
@@ -29,7 +29,7 @@
  * Struct definition.
  *******************************************************************************/
 
-struct bdevt_dev
+struct mem_dev
 {
 	struct list_head list;
 	u32 index;
@@ -84,8 +84,8 @@ module_param_named(is_put_log, is_put_log_, int, S_IRUGO | S_IWUSR);
  * Macro definitions.
  *******************************************************************************/
 
-#define BDEVT_NAME "bdevt"
-#define BDEVT_CTL_NAME "bdevt_ctl"
+#define CRASHBLK_NAME "crashblk"
+#define CRASHBLK_CTL_NAME "crashblk_ctl"
 
 /*******************************************************************************
  * Static functions definition.
@@ -220,30 +220,30 @@ static inline void print_bio(struct bio *bio)
  */
 
 static const int allowed_for_error[] = {
-	BDEVT_STATE_NORMAL,
-	BDEVT_STATE_READ_ERROR,
-	BDEVT_STATE_WRITE_ERROR,
-	BDEVT_STATE_RW_ERROR,
+	CRASHBLK_STATE_NORMAL,
+	CRASHBLK_STATE_READ_ERROR,
+	CRASHBLK_STATE_WRITE_ERROR,
+	CRASHBLK_STATE_RW_ERROR,
 };
 
 static const int allowed_in_error[] = {
-	BDEVT_STATE_READ_ERROR,
-	BDEVT_STATE_WRITE_ERROR,
-	BDEVT_STATE_RW_ERROR,
+	CRASHBLK_STATE_READ_ERROR,
+	CRASHBLK_STATE_WRITE_ERROR,
+	CRASHBLK_STATE_RW_ERROR,
 };
 
 static const int read_error_states[] = {
-	BDEVT_STATE_READ_ERROR,
-	BDEVT_STATE_RW_ERROR,
-	BDEVT_STATE_CRASHING,
-	BDEVT_STATE_CRASHED,
+	CRASHBLK_STATE_READ_ERROR,
+	CRASHBLK_STATE_RW_ERROR,
+	CRASHBLK_STATE_CRASHING,
+	CRASHBLK_STATE_CRASHED,
 };
 
 static const int write_error_states[] = {
-	BDEVT_STATE_WRITE_ERROR,
-	BDEVT_STATE_RW_ERROR,
-	BDEVT_STATE_CRASHING,
-	BDEVT_STATE_CRASHED,
+	CRASHBLK_STATE_WRITE_ERROR,
+	CRASHBLK_STATE_RW_ERROR,
+	CRASHBLK_STATE_CRASHING,
+	CRASHBLK_STATE_CRASHED,
 };
 
 static bool find_state(int state, const int *state_array, size_t size)
@@ -269,7 +269,7 @@ static bool find_state(int state, const int *state_array, size_t size)
  * idr utilities
  */
 
-static bool add_dev_to_idr(struct bdevt_dev *mdev)
+static bool add_dev_to_idr(struct mem_dev *mdev)
 {
 	int minor;
 
@@ -286,7 +286,7 @@ static bool add_dev_to_idr(struct bdevt_dev *mdev)
 	return true;
 }
 
-static void del_dev_from_idr(struct bdevt_dev *mdev)
+static void del_dev_from_idr(struct mem_dev *mdev)
 {
 	ASSERT(mdev->index < (1 << MINORBITS));
 
@@ -295,9 +295,9 @@ static void del_dev_from_idr(struct bdevt_dev *mdev)
 	spin_unlock(&dev_lock_);
 }
 
-static struct bdevt_dev *pop_dev_from_idr(void)
+static struct mem_dev *pop_dev_from_idr(void)
 {
-	struct bdevt_dev *mdev;
+	struct mem_dev *mdev;
 	int minor = 0;
 
 	spin_lock(&dev_lock_);
@@ -315,7 +315,7 @@ static struct bdevt_dev *pop_dev_from_idr(void)
 
 static int get_nr_dev_in_idr(void)
 {
-	struct bdevt_dev *mdev;
+	struct mem_dev *mdev;
 	int minor, nr = 0;
 
 	spin_lock(&dev_lock_);
@@ -331,12 +331,12 @@ static int get_nr_dev_in_idr(void)
  * For tasks
  */
 
-static inline void invoke_bio_task(struct bdevt_dev *mdev)
+static inline void invoke_bio_task(struct mem_dev *mdev)
 {
 	queue_work(mdev->wq, &mdev->bio_task);
 }
 
-static inline void invoke_crash_task(struct bdevt_dev *mdev)
+static inline void invoke_crash_task(struct mem_dev *mdev)
 {
 	queue_work(mdev->wq, &mdev->crash_task);
 }
@@ -348,7 +348,7 @@ static inline void invoke_crash_task(struct bdevt_dev *mdev)
 /**
  * Thread-unsafe.
  */
-static struct page *get_page_for_write(struct bdevt_dev *mdev, u64 blks)
+static struct page *get_page_for_write(struct mem_dev *mdev, u64 blks)
 {
 	struct map_cursor curt;
 	struct page *page0, *page1;
@@ -376,7 +376,7 @@ static struct page *get_page_for_write(struct bdevt_dev *mdev, u64 blks)
 /**
  * Thread-unsafe.
  */
-static struct page *get_page_for_read(struct bdevt_dev *mdev, u64 blks)
+static struct page *get_page_for_read(struct mem_dev *mdev, u64 blks)
 {
 	struct map_cursor curt;
 
@@ -398,7 +398,7 @@ static struct page *get_page_for_read(struct bdevt_dev *mdev, u64 blks)
  *
  * bio->bi_iter will be changed.
  */
-static void exec_bio_detail(struct bdevt_dev *mdev, struct bio *bio, bool is_write)
+static void exec_bio_detail(struct mem_dev *mdev, struct bio *bio, bool is_write)
 {
 	struct page *page;
 	u64 blks;
@@ -437,7 +437,7 @@ static void exec_bio_detail(struct bdevt_dev *mdev, struct bio *bio, bool is_wri
 /**
  * Thread-unsafe.
  */
-static void discard_block(struct bdevt_dev *mdev, u64 blks)
+static void discard_block(struct mem_dev *mdev, u64 blks)
 {
 	struct map_cursor curt;
 	struct map *maps[2] = {mdev->map0, mdev->map1};
@@ -455,7 +455,7 @@ static void discard_block(struct bdevt_dev *mdev, u64 blks)
 /**
  * Thread-unsafe.
  */
-static void discard_bio(struct bdevt_dev *mdev, struct bio *bio)
+static void discard_bio(struct mem_dev *mdev, struct bio *bio)
 {
 	ASSERT(bio->bi_rw & REQ_WRITE);
 	ASSERT(bio->bi_rw & REQ_DISCARD);
@@ -504,7 +504,7 @@ static void flush_block_detail(struct map_cursor *cur, struct map *map1)
 	map_cursor_del(cur);
 }
 
-static void flush_all_blocks(struct bdevt_dev *mdev)
+static void flush_all_blocks(struct mem_dev *mdev)
 {
 	struct map_cursor curt;
 
@@ -523,7 +523,7 @@ static void flush_all_blocks(struct bdevt_dev *mdev)
 /**
  * Range [blks0, blks1).
  */
-static void flush_blocks_in_range(struct bdevt_dev *mdev, u64 blks0, u64 blks1)
+static void flush_blocks_in_range(struct mem_dev *mdev, u64 blks0, u64 blks1)
 {
 	struct map_cursor curt;
 
@@ -541,7 +541,7 @@ static void flush_blocks_in_range(struct bdevt_dev *mdev, u64 blks0, u64 blks1)
 /**
  * Use pos,len instead of bio->bi_iter.bi_sector,bio_sectors(bio).
  */
-static void flush_blocks_for_bio(struct bdevt_dev *mdev, struct bio *bio, sector_t pos, uint len)
+static void flush_blocks_for_bio(struct mem_dev *mdev, struct bio *bio, sector_t pos, uint len)
 {
 	u64 blks0, blks1;
 	u32 rem;
@@ -561,12 +561,12 @@ static void flush_blocks_for_bio(struct bdevt_dev *mdev, struct bio *bio, sector
 	flush_blocks_in_range(mdev, blks0, blks1);
 }
 
-static void exec_read_bio(struct bdevt_dev *mdev, struct bio *bio)
+static void exec_read_bio(struct mem_dev *mdev, struct bio *bio)
 {
 	exec_bio_detail(mdev, bio, false);
 }
 
-static void exec_write_bio(struct bdevt_dev *mdev, struct bio *bio)
+static void exec_write_bio(struct mem_dev *mdev, struct bio *bio)
 {
 	exec_bio_detail(mdev, bio, true);
 }
@@ -580,7 +580,7 @@ static void backup_bio_pos_and_len(struct bio *bio, sector_t *posp, uint *lenp)
 /**
  * Thread-unsafe.
  */
-static void process_bio(struct bdevt_dev *mdev, struct bio *bio)
+static void process_bio(struct mem_dev *mdev, struct bio *bio)
 {
 	const int state = atomic_read(&mdev->state);
 	int err = 0;
@@ -630,7 +630,7 @@ fin:
  */
 static void run_bio_task(struct work_struct *ws)
 {
-	struct bdevt_dev *mdev = container_of(ws, struct bdevt_dev, bio_task);
+	struct mem_dev *mdev = container_of(ws, struct mem_dev, bio_task);
 	struct bio_list bl;
 	struct bio *bio;
 
@@ -650,7 +650,7 @@ static void run_bio_task(struct work_struct *ws)
  */
 static void run_crash_task(struct work_struct *ws)
 {
-	struct bdevt_dev *mdev = container_of(ws, struct bdevt_dev, crash_task);
+	struct mem_dev *mdev = container_of(ws, struct mem_dev, crash_task);
 
 	/*
 	 * Currently we trash all data in the cache layer.
@@ -660,9 +660,9 @@ static void run_crash_task(struct work_struct *ws)
 	free_all_pages_in_map(mdev->map0);
 }
 
-static void bdevt_make_request(struct request_queue *q, struct bio *bio)
+static void crashblk_make_request(struct request_queue *q, struct bio *bio)
 {
-	struct bdevt_dev *mdev = q->queuedata;
+	struct mem_dev *mdev = q->queuedata;
 
 	atomic_inc(&mdev->nr_running);
 
@@ -674,22 +674,22 @@ static void bdevt_make_request(struct request_queue *q, struct bio *bio)
 }
 
 /*
- * Ioctl for /dev/bdevtX
+ * Ioctl for /dev/crashblkX
  */
 
-static void del_dev(struct bdevt_dev *mdev);
+static void del_dev(struct mem_dev *mdev);
 
-static int ioctl_stop_dev(struct bdevt_dev *mdev, struct bdevt_ctl *ctl)
+static int ioctl_stop_dev(struct mem_dev *mdev, struct crashblk_ctl *ctl)
 {
 	del_dev_from_idr(mdev);
 	del_dev(mdev);
 	return 0;
 }
 
-static int ioctl_make_crash(struct bdevt_dev *mdev, struct bdevt_ctl *ctl)
+static int ioctl_make_crash(struct mem_dev *mdev, struct crashblk_ctl *ctl)
 {
 	int prev_st = atomic_read(&mdev->state);
-	int new_st = BDEVT_STATE_CRASHING;
+	int new_st = CRASHBLK_STATE_CRASHING;
 	int st;
 
 	if (!is_allowed_for_error(prev_st)) {
@@ -708,8 +708,8 @@ static int ioctl_make_crash(struct bdevt_dev *mdev, struct bdevt_ctl *ctl)
 	invoke_crash_task(mdev);
 	flush_workqueue(mdev->wq);
 
-	prev_st = BDEVT_STATE_CRASHING;
-	new_st = BDEVT_STATE_CRASHED;
+	prev_st = CRASHBLK_STATE_CRASHING;
+	new_st = CRASHBLK_STATE_CRASHED;
 	st = atomic_cmpxchg(&mdev->state, prev_st, new_st);
 	if (prev_st != st) {
 		LOGe("%u: make_crash: state change to crashed failed: "
@@ -722,10 +722,10 @@ static int ioctl_make_crash(struct bdevt_dev *mdev, struct bdevt_ctl *ctl)
 	return 0;
 }
 
-static int ioctl_recover_crash(struct bdevt_dev *mdev, struct bdevt_ctl *ctl)
+static int ioctl_recover_crash(struct mem_dev *mdev, struct crashblk_ctl *ctl)
 {
-	const int prev_st = BDEVT_STATE_CRASHED;
-	const int new_st = BDEVT_STATE_NORMAL;
+	const int prev_st = CRASHBLK_STATE_CRASHED;
+	const int new_st = CRASHBLK_STATE_NORMAL;
 	int st;
 
 	st = atomic_cmpxchg(&mdev->state, prev_st, new_st);
@@ -738,7 +738,7 @@ static int ioctl_recover_crash(struct bdevt_dev *mdev, struct bdevt_ctl *ctl)
 	return 0;
 }
 
-static int ioctl_make_error(struct bdevt_dev *mdev, struct bdevt_ctl *ctl)
+static int ioctl_make_error(struct mem_dev *mdev, struct crashblk_ctl *ctl)
 {
 	const int prev_st = atomic_read(&mdev->state);
 	const int new_st = ctl->val_int;
@@ -759,10 +759,10 @@ static int ioctl_make_error(struct bdevt_dev *mdev, struct bdevt_ctl *ctl)
 	return 0;
 }
 
-static int ioctl_recover_error(struct bdevt_dev *mdev, struct bdevt_ctl *ctl)
+static int ioctl_recover_error(struct mem_dev *mdev, struct crashblk_ctl *ctl)
 {
 	const int prev_st = atomic_read(&mdev->state);
-	const int new_st = BDEVT_STATE_NORMAL;
+	const int new_st = CRASHBLK_STATE_NORMAL;
 	int st;
 
 	if (!is_allowed_in_error(prev_st)) {
@@ -780,18 +780,18 @@ static int ioctl_recover_error(struct bdevt_dev *mdev, struct bdevt_ctl *ctl)
 	return 0;
 }
 
-static int dispatch_dev_ioctl(struct bdevt_dev *mdev, struct bdevt_ctl *ctl)
+static int dispatch_dev_ioctl(struct mem_dev *mdev, struct crashblk_ctl *ctl)
 {
 	size_t i;
 	struct {
 		int id;
-		int (*handler)(struct bdevt_dev *mdev, struct bdevt_ctl *ctl);
+		int (*handler)(struct mem_dev *mdev, struct crashblk_ctl *ctl);
 	} tbl[] = {
-		{BDEVT_IOCTL_STOP_DEV, ioctl_stop_dev},
-		{BDEVT_IOCTL_MAKE_CRASH, ioctl_make_crash},
-		{BDEVT_IOCTL_RECOVER_CRASH, ioctl_recover_crash},
-		{BDEVT_IOCTL_MAKE_ERROR, ioctl_make_error},
-		{BDEVT_IOCTL_RECOVER_ERROR, ioctl_recover_error},
+		{CRASHBLK_IOCTL_STOP_DEV, ioctl_stop_dev},
+		{CRASHBLK_IOCTL_MAKE_CRASH, ioctl_make_crash},
+		{CRASHBLK_IOCTL_RECOVER_CRASH, ioctl_recover_crash},
+		{CRASHBLK_IOCTL_MAKE_ERROR, ioctl_make_error},
+		{CRASHBLK_IOCTL_RECOVER_ERROR, ioctl_recover_error},
 	};
 
 	for (i = 0; i < sizeof(tbl) / sizeof(tbl[0]); i++) {
@@ -807,13 +807,13 @@ static int dispatch_dev_ioctl(struct bdevt_dev *mdev, struct bdevt_ctl *ctl)
  * Ioctl utility functions.
  */
 
-static struct bdevt_ctl *bdevt_get_ctl(void __user *userctl, gfp_t gfp_mask)
+static struct crashblk_ctl *crashblk_get_ctl(void __user *userctl, gfp_t gfp_mask)
 {
-	struct bdevt_ctl *ctl;
+	struct crashblk_ctl *ctl;
 
 	ctl = kzalloc(sizeof(*ctl), gfp_mask);
 	if (!ctl) {
-		LOGe("memory allocation for bdevt_ctl error.\n");
+		LOGe("memory allocation for crashblk_ctl error.\n");
 		goto error0;
 	}
 
@@ -830,7 +830,7 @@ error0:
 	return NULL;
 }
 
-static bool bdevt_put_ctl(void __user *userctl, struct bdevt_ctl *ctl)
+static bool crashblk_put_ctl(void __user *userctl, struct crashblk_ctl *ctl)
 {
 	bool ret = true;
 
@@ -842,56 +842,56 @@ static bool bdevt_put_ctl(void __user *userctl, struct bdevt_ctl *ctl)
 }
 
 /*
- * For /dev/bdevtX operations.
+ * For /dev/crashblkX operations.
  */
 
-static int bdevt_dev_open(struct block_device *bdev, fmode_t mode)
+static int mem_dev_open(struct block_device *bdev, fmode_t mode)
 {
 	return 0;
 }
 
-static void bdevt_dev_release(struct gendisk *gd, fmode_t mode)
+static void mem_dev_release(struct gendisk *gd, fmode_t mode)
 {
 	/* do nothing */
 }
 
-static int bdevt_dev_ioctl(struct block_device *bdev, fmode_t mode,
+static int mem_dev_ioctl(struct block_device *bdev, fmode_t mode,
 			unsigned int cmd, unsigned long arg)
 {
 	int ret;
-	struct bdevt_ctl *ctl;
-	struct bdevt_ctl __user *user = (struct bdevt_ctl __user *)arg;
-	struct bdevt_dev *mdev = bdev->bd_disk->private_data;
+	struct crashblk_ctl *ctl;
+	struct crashblk_ctl __user *user = (struct crashblk_ctl __user *)arg;
+	struct mem_dev *mdev = bdev->bd_disk->private_data;
 
-	if (cmd != BDEVT_IOCTL)
+	if (cmd != CRASHBLK_IOCTL)
 		return -EFAULT;
 
-	ctl = bdevt_get_ctl(user, GFP_KERNEL);
+	ctl = crashblk_get_ctl(user, GFP_KERNEL);
 	if (!ctl)
 		return -EFAULT;
 
 	ret = dispatch_dev_ioctl(mdev, ctl);
 
-	if (!bdevt_put_ctl(user, ctl))
+	if (!crashblk_put_ctl(user, ctl))
 		return -EFAULT;
 
 	return ret;
 }
 
-static struct block_device_operations bdevt_devops_ = {
+static struct block_device_operations mem_devops_ = {
 	.owner		 = THIS_MODULE,
-	.open		 = bdevt_dev_open,
-	.release	 = bdevt_dev_release,
-	.ioctl		 = bdevt_dev_ioctl
+	.open		 = mem_dev_open,
+	.release	 = mem_dev_release,
+	.ioctl		 = mem_dev_ioctl
 };
 
 /*
  * For controlling devices
  */
 
-static struct bdevt_dev *create_bdevt_dev(void)
+static struct mem_dev *create_mem_dev(void)
 {
-	struct bdevt_dev *mdev;
+	struct mem_dev *mdev;
 
 	mdev = kzalloc(sizeof(*mdev), GFP_KERNEL);
 	if (!mdev) {
@@ -930,7 +930,7 @@ error0:
 	return NULL;
 }
 
-static void destroy_bdevt_dev(struct bdevt_dev *mdev)
+static void destroy_mem_dev(struct mem_dev *mdev)
 {
 	free_all_pages_in_map(mdev->map0);
 	free_all_pages_in_map(mdev->map1);
@@ -942,7 +942,7 @@ static void destroy_bdevt_dev(struct bdevt_dev *mdev)
 /**
  * mdev must have been removed from dev_list_ before calling this.
  */
-static void del_dev(struct bdevt_dev *mdev)
+static void del_dev(struct mem_dev *mdev)
 {
 	const u32 minor = mdev->index;
 	int nr_running;
@@ -961,18 +961,18 @@ static void del_dev(struct bdevt_dev *mdev)
 	destroy_workqueue(mdev->wq);
 	blk_cleanup_queue(mdev->q);
 	put_disk(mdev->disk);
-	destroy_bdevt_dev(mdev);
+	destroy_mem_dev(mdev);
 
-	LOGi("deleted bdevt%u\n", minor);
+	LOGi("deleted crashblk%u\n", minor);
 }
 
 static bool add_dev(u64 size_lb, u32 *minorp)
 {
-	struct bdevt_dev *mdev;
+	struct mem_dev *mdev;
 	struct gendisk *disk;
 	struct request_queue *q;
 
-	mdev = create_bdevt_dev();
+	mdev = create_mem_dev();
 	if (!mdev)
 		return false;
 
@@ -984,14 +984,14 @@ static bool add_dev(u64 size_lb, u32 *minorp)
 		goto error0;
 	}
 	q->queuedata = mdev;
-	blk_queue_make_request(q, bdevt_make_request);
+	blk_queue_make_request(q, crashblk_make_request);
 	disk = mdev->disk = alloc_disk(1);
 	if (!disk) {
 		LOGe("mdev->disk alloc failed.\n");
 		goto error1;
 	}
 
-	mdev->wq = alloc_ordered_workqueue(BDEVT_NAME, WQ_MEM_RECLAIM);
+	mdev->wq = alloc_ordered_workqueue(CRASHBLK_NAME, WQ_MEM_RECLAIM);
 	if (!mdev->wq) {
 		LOGe("unable to allocate workqueue.\n");
 		goto error2;
@@ -1018,16 +1018,16 @@ static bool add_dev(u64 size_lb, u32 *minorp)
 	disk->flags |= GENHD_FL_EXT_DEVT;
 	disk->major = major_;
 	disk->first_minor = mdev->index;
-	disk->fops = &bdevt_devops_;
+	disk->fops = &mem_devops_;
 	disk->private_data = mdev;
 	disk->queue = q;
-	snprintf(disk->disk_name, DISK_NAME_LEN, "%s%u", BDEVT_NAME, mdev->index);
+	snprintf(disk->disk_name, DISK_NAME_LEN, "%s%u", CRASHBLK_NAME, mdev->index);
 	add_disk(disk);
 
 	if (minorp)
 		*minorp = mdev->index;
 
-	LOGi("added bdevt%u\n", mdev->index);
+	LOGi("added crashblk%u\n", mdev->index);
 	return true;
 
 #if 0
@@ -1041,13 +1041,13 @@ error2:
 error1:
 	blk_cleanup_queue(mdev->q);
 error0:
-	destroy_bdevt_dev(mdev);
+	destroy_mem_dev(mdev);
 	return false;
 }
 
 static void exit_all_devices(void)
 {
-	struct bdevt_dev *mdev;
+	struct mem_dev *mdev;
 
 	while ((mdev = pop_dev_from_idr()))
 		del_dev(mdev);
@@ -1060,10 +1060,10 @@ static void init_globals(void)
 }
 
 /*
- * For /dev/bdevt_ctl
+ * For /dev/crashblk_ctl
  */
 
-static int ioctl_start_dev(struct bdevt_ctl *ctl)
+static int ioctl_start_dev(struct crashblk_ctl *ctl)
 {
 	const u64 size_lb = ctl->val_u64;
 	u32 minor = 0;
@@ -1080,28 +1080,28 @@ static int ioctl_start_dev(struct bdevt_ctl *ctl)
 	return 0;
 }
 
-static int ioctl_get_major(struct bdevt_ctl *ctl)
+static int ioctl_get_major(struct crashblk_ctl *ctl)
 {
 	ctl->val_int = major_;
 	return 0;
 }
 
-static int ioctl_num_of_dev(struct bdevt_ctl *ctl)
+static int ioctl_num_of_dev(struct crashblk_ctl *ctl)
 {
 	ctl->val_int = get_nr_dev_in_idr();
 	return 0;
 }
 
-static int dispatch_ctl_ioctl(struct bdevt_ctl *ctl)
+static int dispatch_ctl_ioctl(struct crashblk_ctl *ctl)
 {
 	size_t i;
 	struct {
 		int id;
-		int (*handler)(struct bdevt_ctl *ctl);
+		int (*handler)(struct crashblk_ctl *ctl);
 	} tbl[] = {
-		{BDEVT_IOCTL_START_DEV, ioctl_start_dev},
-		{BDEVT_IOCTL_GET_MAJOR, ioctl_get_major},
-		{BDEVT_IOCTL_NUM_OF_DEV, ioctl_num_of_dev},
+		{CRASHBLK_IOCTL_START_DEV, ioctl_start_dev},
+		{CRASHBLK_IOCTL_GET_MAJOR, ioctl_get_major},
+		{CRASHBLK_IOCTL_NUM_OF_DEV, ioctl_num_of_dev},
 	};
 
 	for (i = 0; i < sizeof(tbl); i++) {
@@ -1113,38 +1113,38 @@ static int dispatch_ctl_ioctl(struct bdevt_ctl *ctl)
 	return -ENOTTY;
 }
 
-static long bdevt_ctl_ioctl(struct file *file, unsigned int command, unsigned long u)
+static long crashblk_ctl_ioctl(struct file *file, unsigned int command, unsigned long u)
 {
 	int ret;
-	struct bdevt_ctl *ctl;
-	struct bdevt_ctl __user *user = (struct bdevt_ctl __user *)u;
+	struct crashblk_ctl *ctl;
+	struct crashblk_ctl __user *user = (struct crashblk_ctl __user *)u;
 
-	if (command != BDEVT_IOCTL)
+	if (command != CRASHBLK_IOCTL)
 		return -EFAULT;
 
-	ctl = bdevt_get_ctl(user, GFP_KERNEL);
+	ctl = crashblk_get_ctl(user, GFP_KERNEL);
 	if (!ctl)
 		return -EFAULT;
 
 	ret = dispatch_ctl_ioctl(ctl);
 
-	if (!bdevt_put_ctl(user, ctl))
+	if (!crashblk_put_ctl(user, ctl))
 		return -EFAULT;
 
 	return ret;
 }
 
 #ifdef CONFIG_COMPAT
-static long bdevt_ctl_compat_ioctl(struct file *file, unsigned int command, unsigned long u)
+static long crashblk_ctl_compat_ioctl(struct file *file, unsigned int command, unsigned long u)
 {
-	return bdevt_ctl_ioctl(file, command, (unsigned long)compat_ptr(u));
+	return crashblk_ctl_ioctl(file, command, (unsigned long)compat_ptr(u));
 }
 #endif
 
 static const struct file_operations ctl_fops_ = {
 	.open = nonseekable_open,
-	.unlocked_ioctl = bdevt_ctl_ioctl,
-	.compat_ioctl = bdevt_ctl_compat_ioctl,
+	.unlocked_ioctl = crashblk_ctl_ioctl,
+	.compat_ioctl = crashblk_ctl_compat_ioctl,
 	.owner = THIS_MODULE,
 };
 
@@ -1152,10 +1152,10 @@ static const struct file_operations ctl_fops_ = {
  * Control device.
  */
 
-static struct miscdevice bdevt_misc_ = {
+static struct miscdevice crashblk_misc_ = {
 	.minor = MISC_DYNAMIC_MINOR,
-	.name  = BDEVT_NAME,
-	.nodename = BDEVT_CTL_NAME,
+	.name  = CRASHBLK_NAME,
+	.nodename = CRASHBLK_CTL_NAME,
 	.fops = &ctl_fops_,
 };
 
@@ -1163,9 +1163,9 @@ static struct miscdevice bdevt_misc_ = {
  * Init/exit functions definition.
  */
 
-static int __init bdevt_init(void)
+static int __init crashblk_init(void)
 {
-	LOGi("%s module init.\n", BDEVT_NAME);
+	LOGi("%s module init.\n", CRASHBLK_NAME);
 	LOGi("build date: " BUILD_DATE "\n");
 
 	init_globals();
@@ -1175,13 +1175,13 @@ static int __init bdevt_init(void)
 		goto error0;
 	}
 
-	major_ = register_blkdev(0, BDEVT_NAME);
+	major_ = register_blkdev(0, CRASHBLK_NAME);
 	if (major_ <= 0) {
 		LOGe("unable to get major device number.\n");
 		goto error1;
 	}
 
-	if (misc_register(&bdevt_misc_) < 0) {
+	if (misc_register(&crashblk_misc_) < 0) {
 		LOGe("unable to register control device.\n");
 		goto error2;
 	}
@@ -1189,10 +1189,10 @@ static int __init bdevt_init(void)
 	return 0;
 #if 0
 error3:
-	misc_deregister(&bdevt_misc_);
+	misc_deregister(&crashblk_misc_);
 #endif
 error2:
-	unregister_blkdev(major_, BDEVT_NAME);
+	unregister_blkdev(major_, CRASHBLK_NAME);
 error1:
 	finalize_treemap_memory_manager(&mmgr_);
 	return -ENOMEM;
@@ -1200,18 +1200,18 @@ error0:
 	return -EBUSY;
 }
 
-static void __exit bdevt_exit(void)
+static void __exit crashblk_exit(void)
 {
-	misc_deregister(&bdevt_misc_);
+	misc_deregister(&crashblk_misc_);
 	exit_all_devices();
-	unregister_blkdev(major_, BDEVT_NAME);
+	unregister_blkdev(major_, CRASHBLK_NAME);
 	idr_destroy(&dev_idr_);
-	LOGi("%s module exit.\n", BDEVT_NAME);
+	LOGi("%s module exit.\n", CRASHBLK_NAME);
 }
 
-module_init(bdevt_init);
-module_exit(bdevt_exit);
+module_init(crashblk_init);
+module_exit(crashblk_exit);
 MODULE_LICENSE("Dual BSD/GPL");
-MODULE_DESCRIPTION("a memory block device driver for test");
-MODULE_ALIAS(BDEVT_NAME);
-/* MODULE_ALIAS_BLOCKDEV_MAJOR(BDEVT_MAJOR); */
+MODULE_DESCRIPTION("a memory block device driver for crash test");
+MODULE_ALIAS(CRASHBLK_NAME);
+/* MODULE_ALIAS_BLOCKDEV_MAJOR(CRASHBLK_MAJOR); */
