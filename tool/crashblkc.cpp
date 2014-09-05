@@ -200,10 +200,10 @@ void dispatch(int argc, char *argv[])
         {"delete", doDelete, "DEV"},
         {"num-dev", doNumDev, ""},
         {"get-major", doGetMajor, ""},
-        {"make-error", doMakeError, "MODE (r/w/rw)"},
-        {"recover-error", doRecoverError, ""},
-        {"make-crash", doMakeCrash, ""},
-        {"recover-crash", doRecoverCrash, ""},
+        {"make-error", doMakeError, "DEV MODE (r/w/rw)"},
+        {"recover-error", doRecoverError, "DEV"},
+        {"make-crash", doMakeCrash, "DEV"},
+        {"recover-crash", doRecoverCrash, "DEV"},
     };
 
     if (argc < 2) {
