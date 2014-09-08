@@ -101,7 +101,7 @@ static void log_info_bio(u32 device_index, const char *type, const struct bio *b
 		return;
 
 	LOGi("%u: %s %" PRIu64 " %u\n", device_index, type
-			, (u64)bio->bi_iter.bi_sector, bio_sectors(bio));
+			, (u64)bio->bi_sector, bio_sectors(bio));
 }
 
 static struct page *alloc_page_retry_forever(void)
@@ -143,77 +143,6 @@ static void free_all_pages_in_map(struct map *map)
 /*
  * Utilities for bio debug.
  */
-
-/**
- * unused
- */
-static inline void print_bvec_iter(struct bvec_iter *iter, const char *prefix)
-{
-	pr_info("%sbvec_iter: sector %" PRIu64 " size %u idx %u bvec_done %u\n"
-		, prefix
-		, (u64)iter->bi_sector
-		, iter->bi_size
-		, iter->bi_idx
-		, iter->bi_bvec_done);
-}
-
-/**
- * unused
- */
-static inline void print_bio_vec(struct bio_vec *bv, const char *prefix)
-{
-	pr_info("%sbio_vec: page %p len %u offset %u\n"
-		, prefix
-		, bv->bv_page
-		, bv->bv_len
-		, bv->bv_offset);
-}
-
-/**
- * unused
- */
-static inline void print_bio(struct bio *bio)
-{
-	struct bio_vec bv;
-	struct bvec_iter iter;
-
-	if (!bio) {
-		pr_info("bio null\n");
-		return;
-	}
-	pr_info("bio %p\n"
-		"  bi_next %p\n"
-		"  bi_flags %lx\n"
-		"  bi_rw %lx\n"
-		"  bi_phys_segments %u\n"
-		"  bi_seg_front_size %u\n"
-		"  bi_seg_back_size %u\n"
-		"  bi_remaining %d\n"
-		"  bi_end_io %p\n"
-		"  bi_private %p\n"
-		"  bi_vcnt %u\n"
-		"  bi_max_vecs %u\n"
-		"  bi_cnt %d\n"
-		, bio
-		, bio->bi_next
-		, bio->bi_flags
-		, bio->bi_rw
-		, bio->bi_phys_segments
-		, bio->bi_seg_front_size
-		, bio->bi_seg_back_size
-		, atomic_read(&bio->bi_remaining)
-		, bio->bi_end_io
-		, bio->bi_private
-		, bio->bi_vcnt
-		, bio->bi_max_vecs
-		, atomic_read(&bio->bi_cnt));
-	print_bvec_iter(&bio->bi_iter, "  cur ");
-
-	bio_for_each_segment(bv, bio, iter) {
-		print_bvec_iter(&iter, "  ");
-		print_bio_vec(&bv, "  ");
-	}
-}
 
 /*
  * State utilities
@@ -410,10 +339,10 @@ static void exec_bio_detail(struct mem_dev *mdev, struct bio *bio, bool is_write
 
 	while (bio_sectors(bio) > 0) {
 		u32 bytes;
-		blks = bio->bi_iter.bi_sector;
+		blks = bio->bi_sector;
 		page_off = do_div(blks, PAGE_SIZE >> 9) << 9;
 		bio_off = bio_offset(bio);
-		bytes = min(bio_iter_len(bio, bio->bi_iter), (u32)(PAGE_SIZE) - page_off);
+		bytes = min(bio_iovec(bio)->bv_len, (u32)(PAGE_SIZE) - page_off);
 
 		if (is_write)
 			page = get_page_for_write(mdev, blks);
@@ -463,9 +392,9 @@ static void discard_bio(struct mem_dev *mdev, struct bio *bio)
 	while (bio_sectors(bio) > 0) {
 		struct page *page;
 		u32 bytes, page_off;
-		u32 blks = bio->bi_iter.bi_sector;
+		u32 blks = bio->bi_sector;
 		page_off = do_div(blks, PAGE_SIZE >> 9) << 9;
-		bytes = min(bio->bi_iter.bi_size, (u32)PAGE_SIZE - page_off);
+		bytes = min(bio->bi_size, (u32)PAGE_SIZE - page_off);
 
 		if (bytes == (u32)PAGE_SIZE) {
 			ASSERT(page_off == 0);
@@ -539,7 +468,7 @@ static void flush_blocks_in_range(struct mem_dev *mdev, u64 blks0, u64 blks1)
 }
 
 /**
- * Use pos,len instead of bio->bi_iter.bi_sector,bio_sectors(bio).
+ * Use pos,len instead of bio->bi_sector,bio_sectors(bio).
  */
 static void flush_blocks_for_bio(struct mem_dev *mdev, struct bio *bio, sector_t pos, uint len)
 {
@@ -573,7 +502,7 @@ static void exec_write_bio(struct mem_dev *mdev, struct bio *bio)
 
 static void backup_bio_pos_and_len(struct bio *bio, sector_t *posp, uint *lenp)
 {
-	*posp = bio->bi_iter.bi_sector;
+	*posp = bio->bi_sector;
 	*lenp = bio_sectors(bio);
 }
 
