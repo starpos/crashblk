@@ -7,6 +7,13 @@ emulating read/write IO error and device crash (or sudden shutdown).
 
 GPLv2 or later.
 
+## Supported kernel version
+
+| Branch   | Kernel version |
+|----------|----------------|
+| master   | 3.14-          |
+| for-3.10 | 3.10-3.14      |
+
 ## Build
 
 ### Kernel driver
