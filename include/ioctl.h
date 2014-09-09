@@ -129,6 +129,15 @@ enum {
 	 * RETURN: 0 in success, or -EFAULT.
 	 */
 	CRASHBLK_IOCTL_RECOVER_ERROR,
+
+	/*
+	 * Get state
+	 *
+	 * INPUT: None.
+	 * OUTPUT: ctl->val_int
+	 *   CRASHBLK_STATE_XXX
+	 */
+	CRASHBLK_IOCTL_GET_STATE,
 };
 
 #define CRASHBLK_STATE_NORMAL            0

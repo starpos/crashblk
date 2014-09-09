@@ -709,6 +709,12 @@ static int ioctl_recover_error(struct mem_dev *mdev, struct crashblk_ctl *ctl)
 	return 0;
 }
 
+static int ioctl_get_state(struct mem_dev *mdev, struct crashblk_ctl *ctl)
+{
+	ctl->val_int = atomic_read(&mdev->state);
+	return 0;
+}
+
 static int dispatch_dev_ioctl(struct mem_dev *mdev, struct crashblk_ctl *ctl)
 {
 	size_t i;
@@ -721,6 +727,7 @@ static int dispatch_dev_ioctl(struct mem_dev *mdev, struct crashblk_ctl *ctl)
 		{CRASHBLK_IOCTL_RECOVER_CRASH, ioctl_recover_crash},
 		{CRASHBLK_IOCTL_MAKE_ERROR, ioctl_make_error},
 		{CRASHBLK_IOCTL_RECOVER_ERROR, ioctl_recover_error},
+		{CRASHBLK_IOCTL_GET_STATE, ioctl_get_state},
 	};
 
 	for (i = 0; i < sizeof(tbl) / sizeof(tbl[0]); i++) {
