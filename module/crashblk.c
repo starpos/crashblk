@@ -929,16 +929,16 @@ static bool add_dev(u64 size_lb, u32 *minorp)
 		goto error1;
 	}
 
-	mdev->wq = alloc_ordered_workqueue(CRASHBLK_NAME, WQ_MEM_RECLAIM);
+	if (!add_dev_to_idr(mdev))
+		goto error2;
+
+	mdev->wq = alloc_ordered_workqueue(CRASHBLK_NAME "%u", WQ_MEM_RECLAIM, mdev->index);
 	if (!mdev->wq) {
 		LOGe("unable to allocate workqueue.\n");
-		goto error2;
+		goto error3;
 	}
 	INIT_WORK(&mdev->bio_task, run_bio_task);
 	INIT_WORK(&mdev->crash_task, run_crash_task);
-
-	if (!add_dev_to_idr(mdev))
-		goto error3;
 
 	blk_queue_logical_block_size(q, LBS);
 	blk_queue_physical_block_size(q, LBS);
@@ -970,10 +970,10 @@ static bool add_dev(u64 size_lb, u32 *minorp)
 
 #if 0
 error4:
-	del_dev_from_idr(mdev);
+	destroy_workqueue(mdev->wq);
 #endif
 error3:
-	destroy_workqueue(mdev->wq);
+	del_dev_from_idr(mdev);
 error2:
 	put_disk(mdev->disk);
 error1:
@@ -1103,7 +1103,7 @@ static struct miscdevice crashblk_misc_ = {
 
 static int __init crashblk_init(void)
 {
-	LOGi("%s module init.\n", CRASHBLK_NAME);
+	LOGi(CRASHBLK_NAME " module init.\n");
 	LOGi("build date: " BUILD_DATE "\n");
 
 	init_globals();
@@ -1118,6 +1118,7 @@ static int __init crashblk_init(void)
 		LOGe("unable to get major device number.\n");
 		goto error1;
 	}
+	LOGi(CRASHBLK_NAME " major %u\n", major_);
 
 	if (misc_register(&crashblk_misc_) < 0) {
 		LOGe("unable to register control device.\n");
