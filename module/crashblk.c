@@ -576,7 +576,8 @@ static void run_bio_task(struct work_struct *ws)
 }
 
 /**
- * run_bio_task() and run_crash_task() are serialized by each ordered workqueue.
+ * run_bio_task() and run_crash_task() are serialized by an ordered workqueue
+ * on each device.
  */
 static void run_crash_task(struct work_struct *ws)
 {
