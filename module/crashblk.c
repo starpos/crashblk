@@ -404,6 +404,7 @@ static void discard_bio(struct mem_dev *mdev, struct bio *bio)
 			page = get_page_for_write(mdev, blks);
 			page_buf = kmap_atomic(page);
 			memset(page_buf + page_off, 0, bytes);
+			kunmap_atomic(page_buf);
 		}
 		bio_advance(bio, bytes);
 	}
