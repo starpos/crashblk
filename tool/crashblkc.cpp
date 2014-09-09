@@ -29,7 +29,7 @@ class Exception : public std::exception
 {
     std::string s_;
 public:
-    Exception(const std::string &s) : s_(s) {}
+    explicit Exception(const std::string &s = "") : s_(s) {}
     const char *what() const noexcept {
         return s_.c_str();
     }
@@ -189,6 +189,35 @@ void doRecoverCrash(const StrVec &params)
     invokeIoctlWithoutParam(devPath, ctl, CRASHBLK_IOCTL_RECOVER_CRASH);
 }
 
+void doGetState(const StrVec &params)
+{
+    const std::string &devPath = getDevPath(params);
+
+    struct crashblk_ctl ctl;
+    invokeIoctlWithoutParam(devPath, ctl, CRASHBLK_IOCTL_GET_STATE);
+    const int state = ctl.val_int;
+
+    struct Pair {
+        int state;
+        const char *name;
+    } tbl[] = {
+        { CRASHBLK_STATE_NORMAL, "normal" },
+        { CRASHBLK_STATE_READ_ERROR, "read_error" },
+        { CRASHBLK_STATE_WRITE_ERROR, "write_error" },
+        { CRASHBLK_STATE_RW_ERROR, "rw_error" },
+        { CRASHBLK_STATE_CRASHING, "crashing", },
+        { CRASHBLK_STATE_CRASHED, "crashed", },
+    };
+
+    for (const Pair &p : tbl) {
+        if (p.state == state) {
+            std::cout << p.name << std::endl;
+            return;
+        }
+    }
+    throw Exception("unknown state") << state;
+}
+
 void dispatch(int argc, char *argv[])
 {
     struct {
@@ -204,6 +233,7 @@ void dispatch(int argc, char *argv[])
         {"recover-error", doRecoverError, "DEV"},
         {"make-crash", doMakeCrash, "DEV"},
         {"recover-crash", doRecoverCrash, "DEV"},
+        {"state", doGetState, "DEV"},
     };
 
     if (argc < 2) {
