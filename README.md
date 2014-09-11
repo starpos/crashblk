@@ -12,7 +12,7 @@ GPLv2 or later.
 | Branch   | Kernel version |
 |----------|----------------|
 | master   | 3.14-          |
-| for-3.10 | 3.10-3.14      |
+| for-3.10 | 3.10-3.13      |
 
 ## Build
 
@@ -50,7 +50,8 @@ Create a device with 1GiB:
 ```
 
 You will get `/dev/crashblk0` of 1GiB size.
-Internally the module will use 2GiB+ memory.
+Internally the module will use 2GiB+ memory
+for *cache* and *original data*.
 
 Delete a device:
 ```
@@ -59,7 +60,7 @@ Delete a device:
 
 Make a device in error state:
 ```
-> sudo crashblkc make-error /dev/crashblk0 MODE
+> sudo crashblkc io-error /dev/crashblk0 MODE
 ```
 You can specify `MODE` as `r`, `w`, or `rw`.
 
@@ -69,21 +70,16 @@ You can specify `MODE` as `r`, `w`, or `rw`.
 | `w`  | write IOs fail |
 | `rw` | all IOs fail   |
 
-Recover from error state:
-```
-> sudo crashblkc recover-error /dev/crashblk0
-```
-
 Make a device in crash state:
 ```
-> sudo crashblkc make-crash /dev/crashblk0
+> sudo crashblkc crash /dev/crashblk0
 ```
 
 Not flushed data will be lost.
 
-Recover a device from crash state:
+Recover a device from crash/io-error state:
 ```
-> sudo crashblkc recover-crash /dev/crashblk0
+> sudo crashblkc recover /dev/crashblk0
 ```
 
 Of course the lost data will not recovered.
