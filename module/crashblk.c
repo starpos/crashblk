@@ -265,6 +265,28 @@ static bool find_state(int state, const int *state_array, size_t size)
 #define is_write_error(state)						\
 	find_state(state, write_error_states, sizeof(write_error_states)/sizeof(int))
 
+static const char *get_state_str(int state)
+{
+	size_t i;
+	struct {
+		int state;
+		const char *name;
+	} tbl[] = {
+		{CRASHBLK_STATE_NORMAL, "normal"},
+		{CRASHBLK_STATE_READ_ERROR, "read_error"},
+		{CRASHBLK_STATE_WRITE_ERROR, "write_error"},
+		{CRASHBLK_STATE_RW_ERROR, "rw_error"},
+		{CRASHBLK_STATE_CRASHING, "crashing"},
+		{CRASHBLK_STATE_CRASHED, "crashed"},
+	};
+
+	for (i = 0; i < sizeof(tbl) / sizeof(tbl[0]); i++) {
+		if (state == tbl[i].state)
+			return tbl[i].name;
+	}
+	return "none";
+}
+
 /*
  * idr utilities
  */
@@ -731,15 +753,17 @@ static int ioctl_io_error(struct mem_dev *mdev, struct crashblk_ctl *ctl)
 	int st;
 
 	if (!is_allowed_for_error(prev_st) || !is_allowed_in_error(new_st)) {
-		LOGe("%u: io_error: bad state prev %d new %d.\n"
-			, mdev->index, prev_st, new_st);
+		LOGe("%u: io_error: bad state prev %s new %s.\n"
+			, mdev->index, get_state_str(prev_st)
+			, get_state_str(new_st));
 		return -EFAULT;
 	}
 	st = atomic_cmpxchg(&mdev->state, prev_st, new_st);
 	if (st != prev_st) {
 		LOGe("%u: io_error: state change failed: "
-			"expected %d prev %d new %d\n"
-			, mdev->index, prev_st, st, new_st);
+			"expected %s prev %s new %s\n"
+			, mdev->index, get_state_str(prev_st)
+			, get_state_str(st), get_state_str(new_st));
 		return -EFAULT;
 	}
 	return 0;
@@ -751,16 +775,18 @@ static int ioctl_recover(struct mem_dev *mdev, struct crashblk_ctl *ctl)
 	const int new_st = CRASHBLK_STATE_NORMAL;
 	int st;
 
-	if (!is_allowed_in_error(prev_st) && prev_st != CRASHBLK_STATE_CRASHED) {
-		LOGe("%u: recover: bad state prev %d.\n"
-			, mdev->index, prev_st);
+	if (!is_allowed_in_error(prev_st)
+		&& prev_st != CRASHBLK_STATE_CRASHED) {
+		LOGe("%u: recover: bad state prev %s.\n"
+			, mdev->index, get_state_str(prev_st));
 		return -EFAULT;
 	}
 	st = atomic_cmpxchg(&mdev->state, prev_st, new_st);
 	if (st != prev_st) {
 		LOGe("%u: recover: state change failed: "
-			"expected %d prev %d\n"
-			, mdev->index, prev_st, st);
+			"expected %s prev %s\n"
+			, mdev->index, get_state_str(prev_st)
+			, get_state_str(st));
 		return -EFAULT;
 	}
 	return 0;
