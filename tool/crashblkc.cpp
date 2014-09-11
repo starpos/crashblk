@@ -141,7 +141,15 @@ void doGetMajor(const StrVec &)
     std::cout << ctl.val_int << std::endl; // device major id.
 }
 
-void doMakeError(const StrVec &params)
+void doCrash(const StrVec &params)
+{
+    const std::string &devPath = getDevPath(params);
+
+    struct crashblk_ctl ctl;
+    invokeIoctlWithoutParam(devPath, ctl, CRASHBLK_IOCTL_CRASH);
+}
+
+void doIoError(const StrVec &params)
 {
     const std::string &devPath = getDevPath(params);
 
@@ -159,34 +167,18 @@ void doMakeError(const StrVec &params)
     }
 
     struct crashblk_ctl ctl = {
-        .command = CRASHBLK_IOCTL_MAKE_ERROR,
+        .command = CRASHBLK_IOCTL_IO_ERROR,
         .val_int = state,
     };
     invokeIoctl(devPath, ctl);
 }
 
-void doRecoverError(const StrVec &params)
+void doRecover(const StrVec &params)
 {
     const std::string &devPath = getDevPath(params);
 
     struct crashblk_ctl ctl;
-    invokeIoctlWithoutParam(devPath, ctl, CRASHBLK_IOCTL_RECOVER_ERROR);
-}
-
-void doMakeCrash(const StrVec &params)
-{
-    const std::string &devPath = getDevPath(params);
-
-    struct crashblk_ctl ctl;
-    invokeIoctlWithoutParam(devPath, ctl, CRASHBLK_IOCTL_MAKE_CRASH);
-}
-
-void doRecoverCrash(const StrVec &params)
-{
-    const std::string &devPath = getDevPath(params);
-
-    struct crashblk_ctl ctl;
-    invokeIoctlWithoutParam(devPath, ctl, CRASHBLK_IOCTL_RECOVER_CRASH);
+    invokeIoctlWithoutParam(devPath, ctl, CRASHBLK_IOCTL_RECOVER);
 }
 
 void doGetState(const StrVec &params)
@@ -229,10 +221,9 @@ void dispatch(int argc, char *argv[])
         {"delete", doDelete, "DEV"},
         {"num-dev", doNumDev, ""},
         {"get-major", doGetMajor, ""},
-        {"make-error", doMakeError, "DEV MODE (r/w/rw)"},
-        {"recover-error", doRecoverError, "DEV"},
-        {"make-crash", doMakeCrash, "DEV"},
-        {"recover-crash", doRecoverCrash, "DEV"},
+        {"crash", doCrash, "DEV"},
+        {"io-error", doIoError, "DEV MODE (r/w/rw)"},
+        {"recover", doRecover, "DEV"},
         {"state", doGetState, "DEV"},
     };
 

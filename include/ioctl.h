@@ -98,16 +98,7 @@ enum {
 	 * OUTPUT: None.
 	 * RETURN: 0 in success, or -EFAULT.
 	 */
-	CRASHBLK_IOCTL_MAKE_CRASH,
-
-	/*
-	 * Recover the device from crash.
-	 *
-	 * INPUT: None.
-	 * OUTPUT: None.
-	 * RETURN: 0 in success, or -EFAULT.
-	 */
-	CRASHBLK_IOCTL_RECOVER_CRASH,
+	CRASHBLK_IOCTL_CRASH,
 
 	/*
 	 * Make the device the state that IOs will fail.
@@ -119,16 +110,16 @@ enum {
 	 * OUTPUT: None.
 	 * RETURN: 0 in success, or -EFAULT.
 	 */
-	CRASHBLK_IOCTL_MAKE_ERROR,
+	CRASHBLK_IOCTL_IO_ERROR,
 
 	/*
-	 * Recover the device from error.
+	 * Recover the device from crash or IO errors.
 	 *
 	 * INPUT: None.
 	 * OUTPUT: None.
 	 * RETURN: 0 in success, or -EFAULT.
 	 */
-	CRASHBLK_IOCTL_RECOVER_ERROR,
+	CRASHBLK_IOCTL_RECOVER,
 
 	/*
 	 * Get state
