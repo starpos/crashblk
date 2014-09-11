@@ -688,7 +688,7 @@ static int ioctl_stop_dev(struct mem_dev *mdev, struct crashblk_ctl *ctl)
 	return 0;
 }
 
-static int ioctl_make_crash(struct mem_dev *mdev, struct crashblk_ctl *ctl)
+static int ioctl_crash(struct mem_dev *mdev, struct crashblk_ctl *ctl)
 {
 	int prev_st = atomic_read(&mdev->state);
 	int new_st = CRASHBLK_STATE_CRASHING;
@@ -724,36 +724,20 @@ static int ioctl_make_crash(struct mem_dev *mdev, struct crashblk_ctl *ctl)
 	return 0;
 }
 
-static int ioctl_recover_crash(struct mem_dev *mdev, struct crashblk_ctl *ctl)
-{
-	const int prev_st = CRASHBLK_STATE_CRASHED;
-	const int new_st = CRASHBLK_STATE_NORMAL;
-	int st;
-
-	st = atomic_cmpxchg(&mdev->state, prev_st, new_st);
-	if (st != prev_st) {
-		LOGe("%u: recover_crash: state change failed: "
-			"expected %d prev %d.\n"
-			, mdev->index, prev_st, st);
-		return -EFAULT;
-	}
-	return 0;
-}
-
-static int ioctl_make_error(struct mem_dev *mdev, struct crashblk_ctl *ctl)
+static int ioctl_io_error(struct mem_dev *mdev, struct crashblk_ctl *ctl)
 {
 	const int prev_st = atomic_read(&mdev->state);
 	const int new_st = ctl->val_int;
 	int st;
 
 	if (!is_allowed_for_error(prev_st) || !is_allowed_in_error(new_st)) {
-		LOGe("%u: make_error: bad state prev %d new %d.\n"
+		LOGe("%u: io_error: bad state prev %d new %d.\n"
 			, mdev->index, prev_st, new_st);
 		return -EFAULT;
 	}
 	st = atomic_cmpxchg(&mdev->state, prev_st, new_st);
 	if (st != prev_st) {
-		LOGe("%u: make_error: state change failed: "
+		LOGe("%u: io_error: state change failed: "
 			"expected %d prev %d new %d\n"
 			, mdev->index, prev_st, st, new_st);
 		return -EFAULT;
@@ -761,20 +745,20 @@ static int ioctl_make_error(struct mem_dev *mdev, struct crashblk_ctl *ctl)
 	return 0;
 }
 
-static int ioctl_recover_error(struct mem_dev *mdev, struct crashblk_ctl *ctl)
+static int ioctl_recover(struct mem_dev *mdev, struct crashblk_ctl *ctl)
 {
 	const int prev_st = atomic_read(&mdev->state);
 	const int new_st = CRASHBLK_STATE_NORMAL;
 	int st;
 
-	if (!is_allowed_in_error(prev_st)) {
-		LOGe("%u: recover_error: bad state prev %d.\n"
+	if (!is_allowed_in_error(prev_st) && prev_st != CRASHBLK_STATE_CRASHED) {
+		LOGe("%u: recover: bad state prev %d.\n"
 			, mdev->index, prev_st);
 		return -EFAULT;
 	}
 	st = atomic_cmpxchg(&mdev->state, prev_st, new_st);
 	if (st != prev_st) {
-		LOGe("%u: recover_error: state change failed: "
+		LOGe("%u: recover: state change failed: "
 			"expected %d prev %d\n"
 			, mdev->index, prev_st, st);
 		return -EFAULT;
@@ -796,10 +780,9 @@ static int dispatch_dev_ioctl(struct mem_dev *mdev, struct crashblk_ctl *ctl)
 		int (*handler)(struct mem_dev *mdev, struct crashblk_ctl *ctl);
 	} tbl[] = {
 		{CRASHBLK_IOCTL_STOP_DEV, ioctl_stop_dev},
-		{CRASHBLK_IOCTL_MAKE_CRASH, ioctl_make_crash},
-		{CRASHBLK_IOCTL_RECOVER_CRASH, ioctl_recover_crash},
-		{CRASHBLK_IOCTL_MAKE_ERROR, ioctl_make_error},
-		{CRASHBLK_IOCTL_RECOVER_ERROR, ioctl_recover_error},
+		{CRASHBLK_IOCTL_CRASH, ioctl_crash},
+		{CRASHBLK_IOCTL_IO_ERROR, ioctl_io_error},
+		{CRASHBLK_IOCTL_RECOVER, ioctl_recover},
 		{CRASHBLK_IOCTL_GET_STATE, ioctl_get_state},
 	};
 
