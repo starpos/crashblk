@@ -210,6 +210,26 @@ void doGetState(const StrVec &params)
     throw Exception("unknown state") << state;
 }
 
+void doSetLostPct(const StrVec &params)
+{
+    const std::string &devPath = getDevPath(params);
+
+    if (params.size() < 2) {
+        throw Exception("percentage must be specified.");
+    }
+    const int pct = static_cast<int>(parseSize(params[1]));
+    if (pct < 0 || pct > 100) {
+        throw Exception("percentage must be in the range [0, 100]")
+            << devPath << pct;
+    }
+
+    struct crashblk_ctl ctl = {
+        .command = CRASHBLK_IOCTL_SET_LOST_PCT,
+        .val_int = pct,
+    };
+    invokeIoctl(devPath, ctl);
+}
+
 void dispatch(int argc, char *argv[])
 {
     struct {
@@ -225,6 +245,7 @@ void dispatch(int argc, char *argv[])
         {"io-error", doIoError, "DEV MODE (r/w/rw)"},
         {"recover", doRecover, "DEV"},
         {"state", doGetState, "DEV"},
+        {"set-lost-pct", doSetLostPct, "DEV PCT (0 to 100)"},
     };
 
     if (argc < 2) {
