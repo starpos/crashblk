@@ -230,6 +230,22 @@ void doSetLostPct(const StrVec &params)
     invokeIoctl(devPath, ctl);
 }
 
+void doSetReorder(const StrVec &params)
+{
+    const std::string &devPath = getDevPath(params);
+
+    if (params.size() < 2) {
+        throw Exception("0 or 1 must be specified.");
+    }
+    const int reorder = static_cast<int>(parseSize(params[1]));
+
+    struct crashblk_ctl ctl = {
+        .command = CRASHBLK_IOCTL_SET_REORDER,
+        .val_int = reorder,
+    };
+    invokeIoctl(devPath, ctl);
+}
+
 void dispatch(int argc, char *argv[])
 {
     struct {
@@ -246,6 +262,7 @@ void dispatch(int argc, char *argv[])
         {"recover", doRecover, "DEV"},
         {"state", doGetState, "DEV"},
         {"set-lost-pct", doSetLostPct, "DEV PCT (0 to 100)"},
+        {"set-reorder", doSetReorder, "DEV VAL (0 or 1)"},
     };
 
     if (argc < 2) {

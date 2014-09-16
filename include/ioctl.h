@@ -138,6 +138,16 @@ enum {
 	 * RETURN: 0 in success, or -EFAULT.
 	 */
 	CRASHBLK_IOCTL_SET_LOST_PCT,
+
+	/*
+	 * Set reorder value.
+	 * INPUT: ctl->val_int
+	 *   0 means reorder off
+	 *   1 means reorder on
+	 * OUTPUT: None.
+	 * RETURN: 0 in success, or -EFAULT.
+	 */
+	CRASHBLK_IOCTL_SET_REORDER,
 };
 
 #define CRASHBLK_STATE_NORMAL            0
