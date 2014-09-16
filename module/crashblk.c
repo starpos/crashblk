@@ -68,6 +68,12 @@ struct mem_dev
 	 * [0, 100].
 	 */
 	atomic_t lost_pct_in_crash;
+
+	/*
+	 * 0 or 1.
+	 * If 1, submitted IOs will be reordered.
+	 */
+	atomic_t does_reorder_io;
 };
 
 /*******************************************************************************
@@ -168,7 +174,8 @@ static void free_pages_in_map_randomly(struct map *map, int pct,
 	map_cursor_begin(&curt);
 	map_cursor_next(&curt);
 	while (!map_cursor_is_end(&curt)) {
-		int rand, pctx;
+		uint rand;
+		int pctx;
 		get_random_bytes(&rand, sizeof(rand));
 		pctx = rand % 100;
 		if (pctx < pct) {
@@ -624,6 +631,86 @@ fin:
 	atomic_dec(&mdev->nr_running);
 }
 
+static void bio_list_insert_randomly(struct bio_list *bl, struct bio *bio, size_t nr)
+{
+	size_t idx, i;
+	struct bio *bio1;
+
+	if (!bl->tail || nr == 0) {
+		bio_list_add(bl, bio);
+		return;
+	}
+
+	/* Decide position randomly. */
+	get_random_bytes(&idx, sizeof(idx));
+	idx %= nr;
+
+	/* Get the insert position. */
+	bio1 = bl->head;
+	for (i = 0; i < idx; i++) {
+		if (!bio1->bi_next)
+			break;
+		bio1 = bio1->bi_next;
+	}
+
+	/* If reached end */
+	if (!bio1->bi_next) {
+		bio_list_add(bl, bio);
+		return;
+	}
+
+	/* Insert bio to the position */
+	ASSERT(bio1 != bl->tail);
+	bio->bi_next = NULL;
+	bio->bi_next = bio1->bi_next;
+	bio1->bi_next = bio;
+}
+
+/**
+ * Reorder bio list randomly.
+ * Any IOs can not get over flush requests.
+ */
+static void reorder_bio_list(struct bio_list *bl)
+{
+	struct bio_list bl0, bl1;
+	struct bio *bio;
+	size_t nr = 0;
+#ifdef DEBUG
+	const size_t size = bio_list_size(bl);
+	size_t nr_flush = 0;
+#endif
+	bio_list_init(&bl0);
+	bio_list_init(&bl1);
+
+	while ((bio = bio_list_pop(bl))) {
+		if (bio->bi_rw & REQ_FLUSH) {
+			bio_list_merge(&bl1, &bl0);
+			bio_list_init(&bl0);
+			bio_list_add(&bl1, bio);
+			nr = 0;
+#ifdef DEBUG
+			nr_flush++;
+#endif
+		} else {
+			bio_list_insert_randomly(&bl0, bio, nr);
+			nr++;
+		}
+	}
+	bio_list_merge(&bl1, &bl0);
+	bio_list_init(&bl0);
+#ifdef DEBUG
+	ASSERT(size == bio_list_size(&bl1));
+	if (size > 1 || nr_flush > 0)
+		LOG_("reorder size > 0: %zu %zu\n", size, nr_flush);
+#endif
+
+	bio_list_merge(bl, &bl1);
+	bio_list_init(&bl1);
+#ifdef DEBUG
+	ASSERT(size == bio_list_size(bl));
+#endif
+}
+
 /*
  * For tasks.
  */
@@ -643,6 +730,9 @@ static void run_bio_task(struct work_struct *ws)
 	bio_list_merge(&bl, &mdev->bl);
 	bio_list_init(&mdev->bl);
 	spin_unlock(&mdev->lock);
+
+	if (atomic_read(&mdev->does_reorder_io))
+		reorder_bio_list(&bl);
 
 	while ((bio = bio_list_pop(&bl)))
 		process_bio(mdev, bio);
@@ -803,6 +893,15 @@ static int ioctl_set_lost_pct(struct mem_dev *mdev, struct crashblk_ctl *ctl)
 	return 0;
 }
 
+static int ioctl_set_reorder(struct mem_dev *mdev, struct crashblk_ctl *ctl)
+{
+	const int reorder = ctl->val_int != 0;
+
+	atomic_set(&mdev->does_reorder_io, reorder);
+	LOGi("%u: set reorder: %d\n", mdev->index, reorder);
+	return 0;
+}
+
 static int dispatch_dev_ioctl(struct mem_dev *mdev, struct crashblk_ctl *ctl)
 {
 	size_t i;
@@ -816,6 +915,7 @@ static int dispatch_dev_ioctl(struct mem_dev *mdev, struct crashblk_ctl *ctl)
 		{CRASHBLK_IOCTL_RECOVER, ioctl_recover},
 		{CRASHBLK_IOCTL_GET_STATE, ioctl_get_state},
 		{CRASHBLK_IOCTL_SET_LOST_PCT, ioctl_set_lost_pct},
+		{CRASHBLK_IOCTL_SET_REORDER, ioctl_set_reorder},
 	};
 
 	for (i = 0; i < sizeof(tbl) / sizeof(tbl[0]); i++) {
@@ -1027,6 +1127,7 @@ static bool add_dev(u64 size_lb, u32 *minorp)
 	INIT_WORK(&mdev->crash_task, run_crash_task);
 	INIT_WORK(&mdev->recover_task, run_recover_task);
 	atomic_set(&mdev->lost_pct_in_crash, 100);
+	atomic_set(&mdev->does_reorder_io, 0);
 
 	blk_queue_logical_block_size(q, LBS);
 	blk_queue_physical_block_size(q, LBS);
