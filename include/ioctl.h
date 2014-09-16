@@ -129,6 +129,15 @@ enum {
 	 *   CRASHBLK_STATE_XXX
 	 */
 	CRASHBLK_IOCTL_GET_STATE,
+
+	/*
+	 * Set lost percentage in crash.
+	 * INPUT: ctl->val_int
+	 *   [0, 100]
+	 * OUTPUT: None.
+	 * RETURN: 0 in success, or -EFAULT.
+	 */
+	CRASHBLK_IOCTL_SET_LOST_PCT,
 };
 
 #define CRASHBLK_STATE_NORMAL            0

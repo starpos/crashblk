@@ -16,6 +16,7 @@
 #include <linux/miscdevice.h>
 #include <linux/spinlock.h>
 #include <linux/idr.h>
+#include <linux/random.h>
 
 #include "common.h"
 #include "block_size.h"
@@ -40,6 +41,7 @@ struct mem_dev
 	struct workqueue_struct *wq;
 	struct work_struct bio_task;
 	struct work_struct crash_task;
+	struct work_struct recover_task;
 
 	/*
 	 * Temporarily inserted bio list.
@@ -60,6 +62,12 @@ struct mem_dev
 	 */
 	struct map *map0; /* cache layer */
 	struct map *map1; /* persistent layer (really in memory) */
+
+	/*
+	 * lost percentage in crash.
+	 * [0, 100].
+	 */
+	atomic_t lost_pct_in_crash;
 };
 
 /*******************************************************************************
@@ -138,6 +146,44 @@ static void free_all_pages_in_map(struct map *map)
 		map_cursor_del(&curt);
 	}
 	ASSERT(map_is_empty(map));
+}
+
+/**
+ * @pct percentage [0, 100]
+ *   100 means all the pages will be freed.
+ *   0 means no page will not be freed.
+ */
+static void free_pages_in_map_randomly(struct map *map, int pct,
+				size_t *nr_alive_p, size_t *nr_lost_p)
+{
+	struct map_cursor curt;
+	size_t nr_alive = 0, nr_lost = 0;
+
+	if (pct < 0)
+		pct = 0;
+	if (pct > 100)
+		pct = 100;
+
+	map_cursor_init(map, &curt);
+	map_cursor_begin(&curt);
+	map_cursor_next(&curt);
+	while (!map_cursor_is_end(&curt)) {
+		int rand, pctx;
+		get_random_bytes(&rand, sizeof(rand));
+		pctx = rand % 100;
+		if (pctx < pct) {
+			__free_page((struct page *)map_cursor_val(&curt));
+			map_cursor_del(&curt);
+			nr_lost++;
+		} else {
+			map_cursor_next(&curt);
+			nr_alive++;
+		}
+	}
+	if (nr_alive_p)
+		*nr_alive_p = nr_alive;
+	if (nr_lost_p)
+		*nr_lost_p = nr_lost;
 }
 
 /*
@@ -361,6 +407,11 @@ static inline void invoke_bio_task(struct mem_dev *mdev)
 static inline void invoke_crash_task(struct mem_dev *mdev)
 {
 	queue_work(mdev->wq, &mdev->crash_task);
+}
+
+static inline void invoke_recover_task(struct mem_dev *mdev)
+{
+	queue_work(mdev->wq, &mdev->recover_task);
 }
 
 /*
@@ -675,13 +726,19 @@ static void run_bio_task(struct work_struct *ws)
 static void run_crash_task(struct work_struct *ws)
 {
 	struct mem_dev *mdev = container_of(ws, struct mem_dev, crash_task);
+	const int pct = atomic_read(&mdev->lost_pct_in_crash);
+	size_t nr_alive, nr_lost;
 
-	/*
-	 * Currently we trash all data in the cache layer.
-	 *
-	 * TODO: trash cache blocks stochastically.
-	 */
-	free_all_pages_in_map(mdev->map0);
+	free_pages_in_map_randomly(mdev->map0, pct, &nr_alive, &nr_lost);
+	LOGi("%u: carsh with lost pct: %d nr_alive: %zu nr_lost: %zu\n"
+		, mdev->index, pct, nr_alive, nr_lost);
+}
+
+static void run_recover_task(struct work_struct *ws)
+{
+	struct mem_dev *mdev = container_of(ws, struct mem_dev, recover_task);
+
+	flush_all_blocks(mdev);
 }
 
 static void crashblk_make_request(struct request_queue *q, struct bio *bio)
@@ -781,6 +838,10 @@ static int ioctl_recover(struct mem_dev *mdev, struct crashblk_ctl *ctl)
 			, mdev->index, get_state_str(prev_st));
 		return -EFAULT;
 	}
+
+	invoke_recover_task(mdev);
+	flush_workqueue(mdev->wq);
+
 	st = atomic_cmpxchg(&mdev->state, prev_st, new_st);
 	if (st != prev_st) {
 		LOGe("%u: recover: state change failed: "
@@ -798,6 +859,21 @@ static int ioctl_get_state(struct mem_dev *mdev, struct crashblk_ctl *ctl)
 	return 0;
 }
 
+static int ioctl_set_lost_pct(struct mem_dev *mdev, struct crashblk_ctl *ctl)
+{
+	const int pct = ctl->val_int;
+
+	if (pct < 0 || pct > 100) {
+		LOGe("%u: pct must be in the range [0, 100] but %d\n"
+			, mdev->index, pct);
+		return -EFAULT;
+	}
+
+	atomic_set(&mdev->lost_pct_in_crash, pct);
+	LOGi("%u: set lost_pct_in_crash: %d\n", mdev->index, pct);
+	return 0;
+}
+
 static int dispatch_dev_ioctl(struct mem_dev *mdev, struct crashblk_ctl *ctl)
 {
 	size_t i;
@@ -810,6 +886,7 @@ static int dispatch_dev_ioctl(struct mem_dev *mdev, struct crashblk_ctl *ctl)
 		{CRASHBLK_IOCTL_IO_ERROR, ioctl_io_error},
 		{CRASHBLK_IOCTL_RECOVER, ioctl_recover},
 		{CRASHBLK_IOCTL_GET_STATE, ioctl_get_state},
+		{CRASHBLK_IOCTL_SET_LOST_PCT, ioctl_set_lost_pct},
 	};
 
 	for (i = 0; i < sizeof(tbl) / sizeof(tbl[0]); i++) {
@@ -1019,6 +1096,8 @@ static bool add_dev(u64 size_lb, u32 *minorp)
 	}
 	INIT_WORK(&mdev->bio_task, run_bio_task);
 	INIT_WORK(&mdev->crash_task, run_crash_task);
+	INIT_WORK(&mdev->recover_task, run_recover_task);
+	atomic_set(&mdev->lost_pct_in_crash, 100);
 
 	blk_queue_logical_block_size(q, LBS);
 	blk_queue_physical_block_size(q, LBS);
