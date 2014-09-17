@@ -88,6 +88,8 @@ struct treemap_memory_manager mmgr_;
 static spinlock_t dev_lock_;
 static struct idr dev_idr_;
 
+atomic_t nr_pages_; /* number of allocated pages for debug. */
+
 /*******************************************************************************
  * Module parameter definitions.
  *******************************************************************************/
@@ -125,7 +127,14 @@ static struct page *alloc_page_retry_forever(void)
 	while (!(page = alloc_page(GFP_NOIO | __GFP_ZERO)))
 		schedule();
 
+	atomic_inc(&nr_pages_);
 	return page;
+}
+
+static void free_page_wrap(struct page *page)
+{
+	__free_page(page);
+	atomic_dec(&nr_pages_);
 }
 
 static void map_add_retry_forever(struct map *map, u64 key, struct page *page)
@@ -148,7 +157,7 @@ static void free_all_pages_in_map(struct map *map)
 	map_cursor_begin(&curt);
 	map_cursor_next(&curt);
 	while (!map_cursor_is_end(&curt)) {
-		__free_page((struct page *)map_cursor_val(&curt));
+		free_page_wrap((struct page *)map_cursor_val(&curt));
 		map_cursor_del(&curt);
 	}
 	ASSERT(map_is_empty(map));
@@ -179,7 +188,7 @@ static void free_pages_in_map_randomly(struct map *map, int pct,
 		get_random_bytes(&rand, sizeof(rand));
 		pctx = rand % 100;
 		if (pctx < pct) {
-			__free_page((struct page *)map_cursor_val(&curt));
+			free_page_wrap((struct page *)map_cursor_val(&curt));
 			map_cursor_del(&curt);
 			nr_lost++;
 		} else {
@@ -455,7 +464,7 @@ static void discard_block(struct mem_dev *mdev, u64 blks)
 	for (i = 0; i < 2; i++) {
 		map_cursor_init(maps[i], &curt);
 		if (map_cursor_search(&curt, blks, MAP_SEARCH_EQ)) {
-			__free_page((struct page *)map_cursor_val(&curt));
+			free_page_wrap((struct page *)map_cursor_val(&curt));
 			map_cursor_del(&curt);
 		}
 	}
@@ -1183,6 +1192,7 @@ static void exit_all_devices(void)
 static void init_globals(void)
 {
 	spin_lock_init(&dev_lock_);
+	atomic_set(&nr_pages_, 0);
 	idr_init(&dev_idr_);
 }
 
@@ -1335,6 +1345,8 @@ static void __exit crashblk_exit(void)
 	unregister_blkdev(major_, CRASHBLK_NAME);
 	idr_destroy(&dev_idr_);
 	finalize_treemap_memory_manager(&mmgr_);
+
+	LOGi("nr_pages: %d\n", atomic_read(&nr_pages_));
 	LOGi("%s module exit.\n", CRASHBLK_NAME);
 }
 
