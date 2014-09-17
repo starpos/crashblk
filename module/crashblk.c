@@ -1334,6 +1334,7 @@ static void __exit crashblk_exit(void)
 	exit_all_devices();
 	unregister_blkdev(major_, CRASHBLK_NAME);
 	idr_destroy(&dev_idr_);
+	finalize_treemap_memory_manager(&mmgr_);
 	LOGi("%s module exit.\n", CRASHBLK_NAME);
 }
 
