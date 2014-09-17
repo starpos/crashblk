@@ -520,6 +520,7 @@ static void flush_block_detail(struct map_cursor *cur, struct map *map1)
 	page1 = (struct page *)map_cursor_val(&curt);
 
 	copy_highpage(page1, page0);
+	free_page_wrap(page0);
 	map_cursor_del(cur);
 }
 
