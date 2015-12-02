@@ -246,6 +246,35 @@ void doSetReorder(const StrVec &params)
     invokeIoctl(devPath, ctl);
 }
 
+void doGetDelayMs(const StrVec &params)
+{
+    const std::string &devPath = getDevPath(params);
+    struct crashblk_ctl ctl;
+    invokeIoctlWithoutParam(devPath, ctl, CRASHBLK_IOCTL_GET_DELAY_MS);
+
+    uint32_t v[2];
+    ::memcpy(&v[0], &ctl.val_u64, sizeof(uint64_t));
+    std::cout << v[0] << std::endl
+              << v[1] << std::endl;
+}
+
+void doSetDelayMs(const StrVec &params)
+{
+    const std::string &devPath = getDevPath(params);
+    if (params.size() < 3) {
+        throw Exception("min_value and max_value must be specified.");
+    }
+    uint32_t v[2];
+    v[0] = static_cast<uint32_t>(parseSize(params[0])); // min
+    v[1] = static_cast<uint32_t>(parseSize(params[1])); // max
+
+    struct crashblk_ctl ctl = {
+        .command = CRASHBLK_IOCTL_SET_DELAY_MS,
+    };
+    ::memcpy(&ctl.val_u64, &v[0], sizeof(uint64_t));
+    invokeIoctl(devPath, ctl);
+}
+
 void dispatch(int argc, char *argv[])
 {
     struct {
@@ -263,6 +292,8 @@ void dispatch(int argc, char *argv[])
         {"state", doGetState, "DEV"},
         {"set-lost-pct", doSetLostPct, "DEV PCT (0 to 100)"},
         {"set-reorder", doSetReorder, "DEV VAL (0 or 1)"},
+        {"get-delay-ms", doGetDelayMs, "DEV"},
+        {"set-delay-ms", doSetDelayMs, "DEV MIN_VAL MAX_VAL"},
     };
 
     if (argc < 2) {

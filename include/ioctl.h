@@ -148,6 +148,24 @@ enum {
 	 * RETURN: 0 in success, or -EFAULT.
 	 */
 	CRASHBLK_IOCTL_SET_REORDER,
+
+	/*
+	 * Get/set min/max delay.
+	 *
+	 * For get:
+	 *   INPUT: None.
+	 *   OUTPUT: ctl->val_u64.
+	 * For set:
+	 *   INPUT: ctl->val_u64.
+	 *   OUTPUT: None.
+	 *
+	 * min value is stored in first 32bit.
+	 * max value is stored in next 32bit.
+	 *
+	 * RETURN 0 in success, or -EFAULT.
+	 */
+	CRASHBLK_IOCTL_GET_DELAY_MS,
+	CRASHBLK_IOCTL_SET_DELAY_MS,
 };
 
 #define CRASHBLK_STATE_NORMAL            0
