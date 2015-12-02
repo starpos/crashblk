@@ -109,10 +109,10 @@ void doCreate(const StrVec &params)
     if (params.empty()) throw Exception("specify size.");
     const uint64_t sizeLb = parseSize(params[0]) >> 9;
 
-    struct crashblk_ctl ctl = {
-        .command = CRASHBLK_IOCTL_START_DEV,
-        .val_u64 = sizeLb,
-    };
+    struct crashblk_ctl ctl;
+    ::memset(&ctl, 0, sizeof(ctl));
+    ctl.command = CRASHBLK_IOCTL_START_DEV;
+    ctl.val_u64 = sizeLb;
     invokeIoctl(ctlPath, ctl);
     std::cout << ctl.val_u32 << std::endl; // minor id.
 }
@@ -166,10 +166,10 @@ void doIoError(const StrVec &params)
         throw Exception("bad mode") << params[1];
     }
 
-    struct crashblk_ctl ctl = {
-        .command = CRASHBLK_IOCTL_IO_ERROR,
-        .val_int = state,
-    };
+    struct crashblk_ctl ctl;
+    ::memset(&ctl, 0, sizeof(ctl));
+    ctl.command = CRASHBLK_IOCTL_IO_ERROR;
+    ctl.val_int = state;
     invokeIoctl(devPath, ctl);
 }
 
@@ -223,10 +223,10 @@ void doSetLostPct(const StrVec &params)
             << devPath << pct;
     }
 
-    struct crashblk_ctl ctl = {
-        .command = CRASHBLK_IOCTL_SET_LOST_PCT,
-        .val_int = pct,
-    };
+    struct crashblk_ctl ctl;
+    ::memset(&ctl, 0, sizeof(ctl));
+    ctl.command = CRASHBLK_IOCTL_SET_LOST_PCT;
+    ctl.val_int = pct;
     invokeIoctl(devPath, ctl);
 }
 
@@ -239,10 +239,10 @@ void doSetReorder(const StrVec &params)
     }
     const int reorder = static_cast<int>(parseSize(params[1]));
 
-    struct crashblk_ctl ctl = {
-        .command = CRASHBLK_IOCTL_SET_REORDER,
-        .val_int = reorder,
-    };
+    struct crashblk_ctl ctl;
+    ::memset(&ctl, 0, sizeof(ctl));
+    ctl.command = CRASHBLK_IOCTL_SET_REORDER;
+    ctl.val_int = reorder;
     invokeIoctl(devPath, ctl);
 }
 
@@ -268,9 +268,9 @@ void doSetDelayMs(const StrVec &params)
     v[0] = static_cast<uint32_t>(parseSize(params[0])); // min
     v[1] = static_cast<uint32_t>(parseSize(params[1])); // max
 
-    struct crashblk_ctl ctl = {
-        .command = CRASHBLK_IOCTL_SET_DELAY_MS,
-    };
+    struct crashblk_ctl ctl;
+    ::memset(&ctl, 0, sizeof(ctl));
+    ctl.command = CRASHBLK_IOCTL_SET_DELAY_MS;
     ::memcpy(&ctl.val_u64, &v[0], sizeof(uint64_t));
     invokeIoctl(devPath, ctl);
 }
