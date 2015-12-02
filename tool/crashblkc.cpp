@@ -109,10 +109,10 @@ void doCreate(const StrVec &params)
     if (params.empty()) throw Exception("specify size.");
     const uint64_t sizeLb = parseSize(params[0]) >> 9;
 
-    struct crashblk_ctl ctl = {
-        .command = CRASHBLK_IOCTL_START_DEV,
-        .val_u64 = sizeLb,
-    };
+    struct crashblk_ctl ctl;
+    ::memset(&ctl, 0, sizeof(ctl));
+    ctl.command = CRASHBLK_IOCTL_START_DEV;
+    ctl.val_u64 = sizeLb;
     invokeIoctl(ctlPath, ctl);
     std::cout << ctl.val_u32 << std::endl; // minor id.
 }
@@ -125,12 +125,10 @@ void doDelete(const StrVec &params)
     invokeIoctlWithoutParam(devPath, ctl, CRASHBLK_IOCTL_STOP_DEV);
 }
 
-void doNumDev(const StrVec &params)
+void doNumDev(const StrVec &)
 {
-    const std::string &devPath = getDevPath(params);
-
     struct crashblk_ctl ctl;
-    invokeIoctlWithoutParam(devPath, ctl, CRASHBLK_IOCTL_NUM_OF_DEV);
+    invokeIoctlWithoutParam(ctlPath, ctl, CRASHBLK_IOCTL_NUM_OF_DEV);
     std::cout << ctl.val_int << std::endl; // number of devices.
 }
 
@@ -166,10 +164,10 @@ void doIoError(const StrVec &params)
         throw Exception("bad mode") << params[1];
     }
 
-    struct crashblk_ctl ctl = {
-        .command = CRASHBLK_IOCTL_IO_ERROR,
-        .val_int = state,
-    };
+    struct crashblk_ctl ctl;
+    ::memset(&ctl, 0, sizeof(ctl));
+    ctl.command = CRASHBLK_IOCTL_IO_ERROR;
+    ctl.val_int = state;
     invokeIoctl(devPath, ctl);
 }
 
@@ -223,10 +221,10 @@ void doSetLostPct(const StrVec &params)
             << devPath << pct;
     }
 
-    struct crashblk_ctl ctl = {
-        .command = CRASHBLK_IOCTL_SET_LOST_PCT,
-        .val_int = pct,
-    };
+    struct crashblk_ctl ctl;
+    ::memset(&ctl, 0, sizeof(ctl));
+    ctl.command = CRASHBLK_IOCTL_SET_LOST_PCT;
+    ctl.val_int = pct;
     invokeIoctl(devPath, ctl);
 }
 
@@ -239,10 +237,46 @@ void doSetReorder(const StrVec &params)
     }
     const int reorder = static_cast<int>(parseSize(params[1]));
 
-    struct crashblk_ctl ctl = {
-        .command = CRASHBLK_IOCTL_SET_REORDER,
-        .val_int = reorder,
+    struct crashblk_ctl ctl;
+    ::memset(&ctl, 0, sizeof(ctl));
+    ctl.command = CRASHBLK_IOCTL_SET_REORDER;
+    ctl.val_int = reorder;
+    invokeIoctl(devPath, ctl);
+}
+
+void doGetDelayMs(const StrVec &params)
+{
+    const std::string &devPath = getDevPath(params);
+    struct crashblk_ctl ctl;
+    invokeIoctlWithoutParam(devPath, ctl, CRASHBLK_IOCTL_GET_DELAY_MS);
+
+    uint32_t v[6];
+    ::memcpy(&v[0], &ctl.data[0], sizeof(uint32_t) * 6);
+    const char *prefix[] = {
+        "read_min:", "read_max:",
+        "write_min:", "write_max:",
+        "flush_min:", "flush_max:",
     };
+    for (size_t i = 0; i < 6; i++) {
+        std::cout << prefix[i] << v[i] << std::endl;
+    }
+}
+
+void doSetDelayMs(const StrVec &params)
+{
+    const std::string &devPath = getDevPath(params);
+    if (params.size() < 7) {
+        throw Exception("min/max values for read/write/flush must be specified.");
+    }
+    uint32_t v[6];
+    for (size_t i = 0; i < 6; i++) {
+        v[i] = static_cast<uint32_t>(parseSize(params[i + 1]));
+    }
+
+    struct crashblk_ctl ctl;
+    ::memset(&ctl, 0, sizeof(ctl));
+    ctl.command = CRASHBLK_IOCTL_SET_DELAY_MS;
+    ::memcpy(&ctl.data[0], &v[0], sizeof(uint32_t) * 6);
     invokeIoctl(devPath, ctl);
 }
 
@@ -263,6 +297,8 @@ void dispatch(int argc, char *argv[])
         {"state", doGetState, "DEV"},
         {"set-lost-pct", doSetLostPct, "DEV PCT (0 to 100)"},
         {"set-reorder", doSetReorder, "DEV VAL (0 or 1)"},
+        {"get-delay-ms", doGetDelayMs, "DEV"},
+        {"set-delay-ms", doSetDelayMs, "DEV READ_MIN READ_MAX WRITE_MIN WRITE_MAX FLUSH_MIN FLUSH_MAX"},
     };
 
     if (argc < 2) {

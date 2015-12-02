@@ -17,6 +17,8 @@
 #include <linux/spinlock.h>
 #include <linux/idr.h>
 #include <linux/random.h>
+#include <linux/hdreg.h>
+#include <linux/delay.h>
 
 #include "common.h"
 #include "block_size.h"
@@ -30,6 +32,16 @@
  * Struct definition.
  *******************************************************************************/
 
+struct mem_req
+{
+	struct list_head list;
+	struct bio *bio;
+	uint64_t pos;
+	uint32_t len;
+	uint error;
+	ulong start_time;
+};
+
 struct mem_dev
 {
 	struct list_head list;
@@ -38,17 +50,20 @@ struct mem_dev
 	struct gendisk *disk;
 
 	/* Ordered queue for serialized (single-threaded) tasks. */
-	struct workqueue_struct *wq;
+	struct workqueue_struct *wq_ordered;
 	struct work_struct bio_task;
 	struct work_struct crash_task;
 	struct work_struct recover_task;
 
 	/*
-	 * Temporarily inserted bio list.
+	 * Temporarily inserted bio list for bio_task.
 	 * This needs lock to access to.
 	 */
-	spinlock_t lock;
-	struct bio_list bl;
+	spinlock_t ready_lock;
+	struct list_head ready_mreq_list;
+
+	/* For waiting (delayed) tasks. */
+	struct workqueue_struct *wq_wait;
 
 	atomic_t nr_running; /* for debug */
 	atomic_t state; /* for error/crash state. */
@@ -74,6 +89,26 @@ struct mem_dev
 	 * If 1, submitted IOs will be reordered.
 	 */
 	atomic_t does_reorder_io;
+
+	/*
+	 * min/max delay for read/write/flush [ms].
+	 * Of course min value must be <= max value.
+	 * delay_ms[0] read min
+	 * delay_ms[1] read max
+	 * delay_ms[2] write min
+	 * delay_ms[3] write max
+	 * delay_ms[4] flush min
+	 * delay_ms[5] flush max
+	 */
+	spinlock_t delay_lock;
+	u32 delay_ms[6];
+};
+
+struct pack_work
+{
+	struct delayed_work dwork;
+	struct mem_dev *mdev;
+	struct list_head mreq_list;
 };
 
 /*******************************************************************************
@@ -111,13 +146,128 @@ module_param_named(is_put_log, is_put_log_, int, S_IRUGO | S_IWUSR);
  * Utilities
  */
 
-static void log_info_bio(u32 device_index, const char *type, const struct bio *bio)
+enum { DELAY_READ = 0, DELAY_WRITE = 1, DELAY_FLUSH = 2, DELAY_MODE_MAX = 3 };
+
+static inline u32* get_delay_ms_ptr(u32 *delay_ms, int mode, int is_max)
+{
+	const size_t i = mode * 2 + is_max;
+
+	ASSERT(mode < DELAY_MODE_MAX);
+	ASSERT(is_max == 0 || is_max == 1);
+	ASSERT(i < 6);
+
+	return &delay_ms[i];
+}
+
+static inline struct mem_req* create_mem_req(struct bio *bio)
+{
+	struct mem_req *mreq;
+
+retry:
+	mreq = kmalloc(sizeof(struct mem_req), GFP_NOIO);
+	if (!mreq) {
+		schedule();
+		goto retry;
+	}
+
+	INIT_LIST_HEAD(&mreq->list);
+	mreq->bio = bio;
+	mreq->pos = bio->bi_iter.bi_sector;
+	mreq->len = bio_sectors(bio);
+	mreq->error = 0;
+	mreq->start_time = 0;
+	return mreq;
+}
+
+static inline void destroy_mem_req(struct mem_req *mreq)
+{
+	ASSERT(mreq);
+	kfree(mreq);
+}
+
+static void log_mreq(struct mem_req *mreq, const char *action)
 {
 	if (!is_put_log_)
 		return;
 
-	LOGi("%u: %s %" PRIu64 " %u\n", device_index, type
-			, (u64)bio->bi_iter.bi_sector, bio_sectors(bio));
+	LOGi("bio %s %" PRIu64 " %u %s%s%s%s%s%s%s\n"
+		, action, mreq->pos, mreq->len
+		, (mreq->bio->bi_rw & REQ_FLUSH) ? "F" : ""
+		, (mreq->bio->bi_rw & REQ_DISCARD) ? "D" : ""
+		, (mreq->bio->bi_rw & REQ_WRITE) ? "W" : "R"
+		, (mreq->bio->bi_rw & REQ_FUA) ? "F" : ""
+		, (mreq->bio->bi_rw & REQ_RAHEAD) ? "A" : ""
+		, (mreq->bio->bi_rw & REQ_SYNC) ? "S" : ""
+		, (mreq->bio->bi_rw & REQ_META) ? "M" : "");
+}
+
+static inline struct pack_work* create_pack_work(
+	struct mem_dev *mdev, struct list_head *mreq_list)
+{
+	struct pack_work *pwork;
+retry:
+	pwork = kmalloc(sizeof(struct pack_work), GFP_NOIO);
+	if (!pwork) {
+		schedule();
+		goto retry;
+	}
+	pwork->mdev = mdev;
+	INIT_LIST_HEAD(&pwork->mreq_list);
+	list_splice_tail_init(mreq_list, &pwork->mreq_list);
+	ASSERT(list_empty(mreq_list));
+	return pwork;
+}
+
+static inline void destroy_pack_work(struct pack_work *pwork)
+{
+	ASSERT(pwork);
+	ASSERT(list_empty(&pwork->mreq_list));
+	kfree(pwork);
+}
+
+static inline void queue_pack_work_task(
+	struct workqueue_struct *wq, struct pack_work *pwork,
+	void (*task)(struct work_struct *), u32 delay_ms)
+{
+	INIT_DELAYED_WORK(&pwork->dwork, task);
+	queue_delayed_work(wq, &pwork->dwork, msecs_to_jiffies(delay_ms));
+}
+
+static inline struct pack_work* get_pack_work_from_work(struct work_struct *work)
+{
+	struct delayed_work *dwork = container_of(work, struct delayed_work, work);
+	struct pack_work *pwork = container_of(dwork, struct pack_work, dwork);
+	return pwork;
+}
+
+static void io_acct_start(struct gendisk *gd, struct mem_req *mreq)
+{
+	int cpu;
+	const int rw = bio_data_dir(mreq->bio);
+	struct hd_struct *part0 = &gd->part0;
+
+	mreq->start_time = jiffies;
+
+	cpu = part_stat_lock();
+	part_round_stats(cpu, part0);
+	part_stat_inc(cpu, part0, ios[rw]);
+	part_stat_add(cpu, part0, sectors[rw], mreq->len);
+	part_inc_in_flight(part0, rw);
+	part_stat_unlock();
+}
+
+static void io_acct_end(struct gendisk *gd, struct mem_req *mreq)
+{
+	int cpu;
+	int rw = bio_data_dir(mreq->bio);
+	struct hd_struct *part0 = &gd->part0;
+	ulong duration = jiffies - mreq->start_time;
+
+	cpu = part_stat_lock();
+	part_round_stats(cpu, part0);
+	part_stat_add(cpu, part0, ticks[rw], duration);
+	part_dec_in_flight(part0, rw);
+	part_stat_unlock();
 }
 
 static struct page *alloc_page_retry_forever(void)
@@ -417,17 +567,17 @@ static int get_nr_dev_in_idr(void)
 
 static inline void invoke_bio_task(struct mem_dev *mdev)
 {
-	queue_work(mdev->wq, &mdev->bio_task);
+	queue_work(mdev->wq_ordered, &mdev->bio_task);
 }
 
 static inline void invoke_crash_task(struct mem_dev *mdev)
 {
-	queue_work(mdev->wq, &mdev->crash_task);
+	queue_work(mdev->wq_ordered, &mdev->crash_task);
 }
 
 static inline void invoke_recover_task(struct mem_dev *mdev)
 {
-	queue_work(mdev->wq, &mdev->recover_task);
+	queue_work(mdev->wq_ordered, &mdev->recover_task);
 }
 
 /*
@@ -662,139 +812,109 @@ static void exec_write_bio(struct mem_dev *mdev, struct bio *bio)
 	exec_bio_detail(mdev, bio, true);
 }
 
-static void backup_bio_pos_and_len(struct bio *bio, sector_t *posp, uint *lenp)
-{
-	*posp = bio->bi_iter.bi_sector;
-	*lenp = bio_sectors(bio);
-}
-
 /**
  * Thread-unsafe.
  */
-static void process_bio(struct mem_dev *mdev, struct bio *bio)
+static void process_bio(struct mem_dev *mdev, struct mem_req *mreq)
 {
 	const int state = atomic_read(&mdev->state);
-	int err = 0;
+	struct bio *bio = mreq->bio;
+	mreq->error = 0;
 
+	log_mreq(mreq, "exec ");
 	if (bio->bi_rw & REQ_WRITE) {
-		sector_t pos;
-		uint len;
 		if (is_write_error(state)) {
-			err = -EIO;
+			mreq->error = -EIO;
 			goto fin;
 		}
 		if (bio->bi_rw & REQ_FLUSH) {
-			log_info_bio(mdev->index, "flush", bio);
 			flush_all_blocks(mdev);
 			if (bio_sectors(bio) == 0)
 				goto fin;
 		}
-		backup_bio_pos_and_len(bio, &pos, &len);
 		if (bio->bi_rw & REQ_DISCARD) {
-			log_info_bio(mdev->index, "discard", bio);
 			discard_bio(mdev, bio);
 		} else {
-			log_info_bio(mdev->index, "write", bio);
 			exec_write_bio(mdev, bio);
 		}
-		if (bio->bi_rw & REQ_FUA)
-			flush_blocks_for_bio(mdev, bio, pos, len);
+		if (bio->bi_rw & REQ_FUA) {
+			flush_blocks_for_bio(mdev, bio, mreq->pos, mreq->len);
+		}
 	} else {
 		if (is_read_error(state)) {
-			err = -EIO;
+			mreq->error = -EIO;
 			goto fin;
 		}
-		log_info_bio(mdev->index, "read", bio);
 		exec_read_bio(mdev, bio);
 	}
 fin:
-	bio_endio(bio, err);
-	atomic_dec(&mdev->nr_running);
-}
+	if (mreq->error)
+		clear_bit(BIO_UPTODATE, &bio->bi_flags);
+	else
+		set_bit(BIO_UPTODATE, &bio->bi_flags);
 
-static void bio_list_insert_randomly(struct bio_list *bl, struct bio *bio, size_t nr)
-{
-	size_t idx, i;
-	struct bio *bio1;
-
-	if (!bl->tail || nr == 0) {
-		bio_list_add(bl, bio);
-		return;
-	}
-
-	/* Decide position randomly. */
-	get_random_bytes(&idx, sizeof(idx));
-	idx %= nr;
-
-	/* Get the insert position. */
-	bio1 = bl->head;
-	for (i = 0; i < idx; i++) {
-		if (!bio1->bi_next)
-			break;
-		bio1 = bio1->bi_next;
-	}
-
-	/* If reached end */
-	if (!bio1->bi_next) {
-		bio_list_add(bl, bio);
-		return;
-	}
-
-	/* Insert bio to the position */
-	ASSERT(bio1 != bl->tail);
-	bio->bi_next = NULL;
-	bio->bi_next = bio1->bi_next;
-	bio1->bi_next = bio;
-}
-
-/**
- * Reorder bio list randomly.
- * Any IOs can not get over flush requests.
- */
-static void reorder_bio_list(struct bio_list *bl)
-{
-	struct bio_list bl0, bl1;
-	struct bio *bio;
-	size_t nr = 0;
-#ifdef DEBUG
-	const size_t size = bio_list_size(bl);
-	size_t nr_flush = 0;
-#endif
-	bio_list_init(&bl0);
-	bio_list_init(&bl1);
-
-	while ((bio = bio_list_pop(bl))) {
-		if (bio->bi_rw & REQ_FLUSH) {
-			bio_list_merge(&bl1, &bl0);
-			bio_list_init(&bl0);
-			bio_list_add(&bl1, bio);
-			nr = 0;
-#ifdef DEBUG
-			nr_flush++;
-#endif
-		} else {
-			bio_list_insert_randomly(&bl0, bio, nr);
-			nr++;
-		}
-	}
-	bio_list_merge(&bl1, &bl0);
-	bio_list_init(&bl0);
-#ifdef DEBUG
-	ASSERT(size == bio_list_size(&bl1));
-	if (size > 1 || nr_flush > 0)
-		LOG_("reorder size > 0: %zu %zu\n", size, nr_flush);
-#endif
-
-	bio_list_merge(bl, &bl1);
-	bio_list_init(&bl1);
-#ifdef DEBUG
-	ASSERT(size == bio_list_size(bl));
-#endif
+	/* bio_endio() call is deferred. */
 }
 
 /*
  * For tasks.
  */
+
+static void run_delay2_task(struct work_struct *ws)
+{
+	struct pack_work *pwork = get_pack_work_from_work(ws);
+	struct mem_dev *mdev = pwork->mdev;
+	struct mem_req *mreq, *mreq_next;
+
+	list_for_each_entry_safe(mreq, mreq_next, &pwork->mreq_list, list) {
+		list_del(&mreq->list);
+		log_mreq(mreq, "end  ");
+		io_acct_end(mdev->disk, mreq);
+		bio_endio(mreq->bio, mreq->error);
+		destroy_mem_req(mreq);
+		atomic_dec(&mdev->nr_running);
+	}
+	destroy_pack_work(pwork);
+}
+
+static inline u32 get_random_delay(struct mem_dev *mdev, struct mem_req *mreq)
+{
+	u32 diff, min_delay, delay;
+	int mode;
+
+	spin_lock(&mdev->delay_lock);
+	if ((mreq->bio->bi_rw & REQ_FLUSH) || (mreq->bio->bi_rw & REQ_FUA)) {
+		mode = DELAY_FLUSH;
+	} else if (mreq->bio->bi_rw & REQ_WRITE) {
+		mode = DELAY_WRITE;
+	} else {
+		mode = DELAY_READ;
+	}
+	min_delay = *get_delay_ms_ptr(mdev->delay_ms, mode, 0);
+	diff = *get_delay_ms_ptr(mdev->delay_ms, mode, 1) - min_delay;
+	spin_unlock(&mdev->delay_lock);
+
+	if (diff == 0)
+		return min_delay;
+
+	get_random_bytes(&delay, sizeof(delay));
+	delay %= diff;
+	delay += min_delay;
+	return delay;
+}
+
+static inline void invoke_delay2_task(struct mem_dev *mdev, struct list_head *mreq_list)
+{
+	struct pack_work *pwork;
+	uint delay_ms;
+
+	ASSERT(!list_empty(mreq_list));
+	pwork = create_pack_work(mdev, mreq_list);
+	ASSERT(pwork);
+
+	delay_ms = 0; /* currently delay is zero. */
+	queue_pack_work_task(mdev->wq_wait, pwork, run_delay2_task, delay_ms);
+}
 
 /**
  * run_bio_task() and run_crash_task() are serialized by each ordered workqueue.
@@ -802,21 +922,23 @@ static void reorder_bio_list(struct bio_list *bl)
 static void run_bio_task(struct work_struct *ws)
 {
 	struct mem_dev *mdev = container_of(ws, struct mem_dev, bio_task);
-	struct bio_list bl;
-	struct bio *bio;
+	struct list_head mreq_list;
+	struct mem_req *mreq;
 
-	bio_list_init(&bl);
+	INIT_LIST_HEAD(&mreq_list);
 
-	spin_lock(&mdev->lock);
-	bio_list_merge(&bl, &mdev->bl);
-	bio_list_init(&mdev->bl);
-	spin_unlock(&mdev->lock);
+	spin_lock(&mdev->ready_lock);
+	list_splice_tail_init(&mdev->ready_mreq_list, &mreq_list);
+	ASSERT(list_empty(&mdev->ready_mreq_list));
+	spin_unlock(&mdev->ready_lock);
 
-	if (atomic_read(&mdev->does_reorder_io))
-		reorder_bio_list(&bl);
+	if (list_empty(&mreq_list))
+		return;
 
-	while ((bio = bio_list_pop(&bl)))
-		process_bio(mdev, bio);
+	list_for_each_entry(mreq, &mreq_list, list)
+		process_bio(mdev, mreq);
+
+	invoke_delay2_task(mdev, &mreq_list);
 }
 
 /**
@@ -841,17 +963,46 @@ static void run_recover_task(struct work_struct *ws)
 	flush_all_blocks(mdev);
 }
 
+static void run_delay1_task(struct work_struct *ws)
+{
+	struct pack_work *pwork = get_pack_work_from_work(ws);
+	struct mem_dev *mdev = pwork->mdev;
+
+	spin_lock(&mdev->ready_lock);
+	list_splice_tail_init(&pwork->mreq_list, &mdev->ready_mreq_list);
+	ASSERT(list_empty(&pwork->mreq_list));
+	spin_unlock(&mdev->ready_lock);
+
+	invoke_bio_task(mdev);
+	destroy_pack_work(pwork);
+}
+
+static inline void invoke_delay1_task(struct mem_dev *mdev, struct mem_req *mreq)
+{
+	struct list_head mreq_list;
+	struct pack_work *pwork;
+	u32 delay_ms;
+
+	INIT_LIST_HEAD(&mreq_list);
+	list_add(&mreq->list, &mreq_list);
+
+	pwork = create_pack_work(mdev, &mreq_list);
+	ASSERT(pwork);
+
+	delay_ms = get_random_delay(mdev, mreq);
+	queue_pack_work_task(mdev->wq_wait, pwork, run_delay1_task, delay_ms);
+}
+
 static void crashblk_make_request(struct request_queue *q, struct bio *bio)
 {
 	struct mem_dev *mdev = q->queuedata;
+	struct mem_req *mreq;
 
 	atomic_inc(&mdev->nr_running);
-
-	spin_lock(&mdev->lock);
-	bio_list_add(&mdev->bl, bio);
-	spin_unlock(&mdev->lock);
-
-	invoke_bio_task(mdev);
+	mreq = create_mem_req(bio);
+	io_acct_start(mdev->disk, mreq);
+	log_mreq(mreq, "start");
+	invoke_delay1_task(mdev, mreq);
 }
 
 /*
@@ -887,7 +1038,7 @@ static int ioctl_crash(struct mem_dev *mdev, struct crashblk_ctl *ctl)
 	LOGi("%u: state change: crashing\n", mdev->index);
 
 	invoke_crash_task(mdev);
-	flush_workqueue(mdev->wq);
+	flush_workqueue(mdev->wq_ordered);
 
 	prev_st = CRASHBLK_STATE_CRASHING;
 	new_st = CRASHBLK_STATE_CRASHED;
@@ -940,7 +1091,7 @@ static int ioctl_recover(struct mem_dev *mdev, struct crashblk_ctl *ctl)
 	}
 
 	invoke_recover_task(mdev);
-	flush_workqueue(mdev->wq);
+	flush_workqueue(mdev->wq_ordered);
 
 	st = atomic_cmpxchg(&mdev->state, prev_st, new_st);
 	if (st != prev_st) {
@@ -983,6 +1134,45 @@ static int ioctl_set_reorder(struct mem_dev *mdev, struct crashblk_ctl *ctl)
 	return 0;
 }
 
+static int ioctl_get_delay_ms(struct mem_dev *mdev, struct crashblk_ctl *ctl)
+{
+	spin_lock(&mdev->delay_lock);
+	memcpy(&ctl->data[0], &mdev->delay_ms[0], sizeof(u32) * 6);
+	spin_unlock(&mdev->delay_lock);
+	return 0;
+}
+
+
+static int ioctl_set_delay_ms(struct mem_dev *mdev, struct crashblk_ctl *ctl)
+{
+	u32 v[6];
+	const char *DELAY_MODE_STR[] = {"read", "write", "flush"};
+        int mode;
+
+	memcpy(&v[0], &ctl->data[0], sizeof(u32) * 6);
+	for (mode = 0; mode < DELAY_MODE_MAX; mode++) {
+		const u32 *minp = get_delay_ms_ptr(v, mode, 0);
+		const u32 *maxp = get_delay_ms_ptr(v, mode, 1);
+		if (*minp > *maxp) {
+			LOGe("%u: min/max constraint error for %s delay: %u %u\n"
+				, mdev->index, DELAY_MODE_STR[mode], *minp, *maxp);
+			return -EFAULT;
+		}
+	}
+
+	spin_lock(&mdev->delay_lock);
+	memcpy(&mdev->delay_ms[0], &v[0], sizeof(u32) * 6);
+	spin_unlock(&mdev->delay_lock);
+
+	for (mode = 0; mode < DELAY_MODE_MAX; mode++) {
+		const u32 *minp = get_delay_ms_ptr(v, mode, 0);
+		const u32 *maxp = get_delay_ms_ptr(v, mode, 1);
+		LOGi("%u: set delay ms min:%u max:%u for %s\n"
+			, mdev->index, *minp, *maxp, DELAY_MODE_STR[mode]);
+	}
+	return 0;
+}
+
 static int dispatch_dev_ioctl(struct mem_dev *mdev, struct crashblk_ctl *ctl)
 {
 	size_t i;
@@ -997,6 +1187,8 @@ static int dispatch_dev_ioctl(struct mem_dev *mdev, struct crashblk_ctl *ctl)
 		{CRASHBLK_IOCTL_GET_STATE, ioctl_get_state},
 		{CRASHBLK_IOCTL_SET_LOST_PCT, ioctl_set_lost_pct},
 		{CRASHBLK_IOCTL_SET_REORDER, ioctl_set_reorder},
+		{CRASHBLK_IOCTL_GET_DELAY_MS, ioctl_get_delay_ms},
+		{CRASHBLK_IOCTL_SET_DELAY_MS, ioctl_set_delay_ms},
 	};
 
 	for (i = 0; i < sizeof(tbl) / sizeof(tbl[0]); i++) {
@@ -1060,6 +1252,14 @@ static void mem_dev_release(struct gendisk *gd, fmode_t mode)
 	/* do nothing */
 }
 
+void set_geometry(struct hd_geometry *geo, u64 n_sectors)
+{
+	geo->heads = 4;
+	geo->sectors = 16;
+	geo->cylinders = n_sectors >> 6;
+	geo->start = 0;
+}
+
 static int mem_dev_ioctl(struct block_device *bdev, fmode_t mode,
 			unsigned int cmd, unsigned long arg)
 {
@@ -1068,8 +1268,15 @@ static int mem_dev_ioctl(struct block_device *bdev, fmode_t mode,
 	struct crashblk_ctl __user *user = (struct crashblk_ctl __user *)arg;
 	struct mem_dev *mdev = bdev->bd_disk->private_data;
 
+	if (cmd == HDIO_GETGEO) {
+		struct hd_geometry geo;
+		set_geometry(&geo, get_capacity(mdev->disk));
+		if (copy_to_user((void __user *)arg, &geo, sizeof(geo)))
+			return -EFAULT;
+		return 0;
+	}
 	if (cmd != CRASHBLK_IOCTL)
-		return -EFAULT;
+		return -ENOTTY;
 
 	ctl = crashblk_get_ctl(user, GFP_KERNEL);
 	if (!ctl)
@@ -1116,10 +1323,20 @@ static struct mem_dev *create_mem_dev(void)
 		goto error1;
 	}
 
-	spin_lock_init(&mdev->lock);
-	bio_list_init(&mdev->bl);
+	spin_lock_init(&mdev->ready_lock);
+	INIT_LIST_HEAD(&mdev->ready_mreq_list);
 	atomic_set(&mdev->nr_running, 0);
 	atomic_set(&mdev->state, 0);
+	spin_lock_init(&mdev->delay_lock);
+	spin_lock(&mdev->delay_lock);
+        /* default value */
+        *get_delay_ms_ptr(mdev->delay_ms, DELAY_READ, 0) = 0;
+        *get_delay_ms_ptr(mdev->delay_ms, DELAY_READ, 1) = 0;
+        *get_delay_ms_ptr(mdev->delay_ms, DELAY_WRITE, 0) = 0;
+        *get_delay_ms_ptr(mdev->delay_ms, DELAY_WRITE, 1) = 3;
+        *get_delay_ms_ptr(mdev->delay_ms, DELAY_FLUSH, 0) = 10;
+        *get_delay_ms_ptr(mdev->delay_ms, DELAY_FLUSH, 1) = 10;
+	spin_unlock(&mdev->delay_lock);
 	mdev->index = (u32)(-1);
 
 	return mdev;
@@ -1155,15 +1372,17 @@ static void del_dev(struct mem_dev *mdev)
 	del_gendisk(mdev->disk);
 
 	/* Complete all pending IOs. */
-	invoke_bio_task(mdev);
-	flush_workqueue(mdev->wq);
+	flush_workqueue(mdev->wq_wait); /* waiting/reorder tasks.*/
+	flush_workqueue(mdev->wq_ordered);
+	flush_workqueue(mdev->wq_wait); /* completion tasks. */
 
-	ASSERT(bio_list_empty(&mdev->bl));
+	ASSERT(list_empty(&mdev->ready_mreq_list));
 	nr_running = atomic_read(&mdev->nr_running);
 	LOGi("%u: nr_running: %d\n", mdev->index, nr_running);
 	ASSERT(nr_running == 0);
 
-	destroy_workqueue(mdev->wq);
+	destroy_workqueue(mdev->wq_ordered);
+	destroy_workqueue(mdev->wq_wait);
 	blk_cleanup_queue(mdev->q);
 	put_disk(mdev->disk);
 	destroy_mem_dev(mdev);
@@ -1199,16 +1418,24 @@ static bool add_dev(u64 size_lb, u32 *minorp)
 	if (!add_dev_to_idr(mdev))
 		goto error2;
 
-	mdev->wq = alloc_ordered_workqueue(CRASHBLK_NAME "%u", WQ_MEM_RECLAIM, mdev->index);
-	if (!mdev->wq) {
-		LOGe("unable to allocate workqueue.\n");
+	mdev->wq_ordered = alloc_ordered_workqueue(CRASHBLK_NAME "%uo", WQ_MEM_RECLAIM, mdev->index);
+	if (!mdev->wq_ordered) {
+		LOGe("unable to allocate workqueue (ordered).\n");
 		goto error3;
 	}
 	INIT_WORK(&mdev->bio_task, run_bio_task);
 	INIT_WORK(&mdev->crash_task, run_crash_task);
 	INIT_WORK(&mdev->recover_task, run_recover_task);
+
+	mdev->wq_wait = alloc_workqueue(CRASHBLK_NAME "%uw", WQ_UNBOUND | WQ_MEM_RECLAIM,
+					WQ_UNBOUND_MAX_ACTIVE, mdev->index);
+	if (!mdev->wq_wait) {
+		LOGe("unable to allocate workqueue (wait).");
+		goto error4;
+	}
+
 	atomic_set(&mdev->lost_pct_in_crash, 100);
-	atomic_set(&mdev->does_reorder_io, 0);
+	atomic_set(&mdev->does_reorder_io, 1);
 
 	blk_queue_logical_block_size(q, LBS);
 	blk_queue_physical_block_size(q, LBS);
@@ -1239,9 +1466,11 @@ static bool add_dev(u64 size_lb, u32 *minorp)
 	return true;
 
 #if 0
-error4:
-	destroy_workqueue(mdev->wq);
+error5:
+	destroy_workqueue(mdev->wq_wait)
 #endif
+error4:
+	destroy_workqueue(mdev->wq_ordered);
 error3:
 	del_dev_from_idr(mdev);
 error2:

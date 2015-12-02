@@ -24,6 +24,7 @@ extern "C" {
 struct crashblk_ctl {
 	/* Command id. */
 	int command;
+	int reserved;
 
 	/* Used for integer value transfer. */
 	union {
@@ -31,6 +32,7 @@ struct crashblk_ctl {
 		u64 val_u64;
 		u32 val_u32;
 	};
+	char data[512 - sizeof(int) * 2 - sizeof(u64)];
 } __attribute__((packed));
 
 /**
@@ -148,6 +150,26 @@ enum {
 	 * RETURN: 0 in success, or -EFAULT.
 	 */
 	CRASHBLK_IOCTL_SET_REORDER,
+
+	/*
+	 * Get/set min/max delay.
+	 *
+	 * For get:
+	 *   INPUT: None.
+	 *   OUTPUT: ctl->data (first 24 bytes).
+	 * For set:
+	 *   INPUT: ctl->data (first 24 bytes).
+	 *   OUTPUT: None.
+	 *
+	 * six 32bit values for
+	 * read_min, read_max,
+	 * write_min, write_max,
+	 * flush_min, flush_max in the order.
+	 *
+	 * RETURN 0 in success, or -EFAULT.
+	 */
+	CRASHBLK_IOCTL_GET_DELAY_MS,
+	CRASHBLK_IOCTL_SET_DELAY_MS,
 };
 
 #define CRASHBLK_STATE_NORMAL            0
