@@ -265,8 +265,8 @@ void doSetDelayMs(const StrVec &params)
         throw Exception("min_value and max_value must be specified.");
     }
     uint32_t v[2];
-    v[0] = static_cast<uint32_t>(parseSize(params[0])); // min
-    v[1] = static_cast<uint32_t>(parseSize(params[1])); // max
+    v[0] = static_cast<uint32_t>(parseSize(params[1])); // min
+    v[1] = static_cast<uint32_t>(parseSize(params[2])); // max
 
     struct crashblk_ctl ctl;
     ::memset(&ctl, 0, sizeof(ctl));
