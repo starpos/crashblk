@@ -1168,7 +1168,7 @@ static int mem_dev_ioctl(struct block_device *bdev, fmode_t mode,
 		return 0;
 	}
 	if (cmd != CRASHBLK_IOCTL)
-		return -EFAULT;
+		return -ENOTTY;
 
 	ctl = crashblk_get_ctl(user, GFP_KERNEL);
 	if (!ctl)
