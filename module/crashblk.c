@@ -18,6 +18,7 @@
 #include <linux/idr.h>
 #include <linux/random.h>
 #include <linux/hdreg.h>
+#include <linux/delay.h>
 
 #include "common.h"
 #include "block_size.h"
@@ -96,6 +97,7 @@ struct mem_dev
 	spinlock_t delay_lock;
 	u32 min_delay_ms;
 	u32 max_delay_ms;
+	u32 flush_delay_ms;
 };
 
 struct pack_work
@@ -722,6 +724,18 @@ static void exec_write_bio(struct mem_dev *mdev, struct bio *bio)
 	exec_bio_detail(mdev, bio, true);
 }
 
+static void sleep_before_flush(struct mem_dev *mdev)
+{
+	u32 flush_delay_ms;
+
+	spin_lock(&mdev->delay_lock);
+	flush_delay_ms = mdev->flush_delay_ms;
+	spin_unlock(&mdev->delay_lock);
+
+	if (flush_delay_ms > 0)
+		msleep(flush_delay_ms);
+}
+
 /**
  * Thread-unsafe.
  */
@@ -738,6 +752,7 @@ static void process_bio(struct mem_dev *mdev, struct mem_req *mreq)
 			goto fin;
 		}
 		if (bio->bi_rw & REQ_FLUSH) {
+			sleep_before_flush(mdev);
 			flush_all_blocks(mdev);
 			if (bio_sectors(bio) == 0)
 				goto fin;
@@ -747,8 +762,11 @@ static void process_bio(struct mem_dev *mdev, struct mem_req *mreq)
 		} else {
 			exec_write_bio(mdev, bio);
 		}
-		if (bio->bi_rw & REQ_FUA)
+		if (bio->bi_rw & REQ_FUA) {
+			if (!(bio->bi_rw & REQ_FLUSH))
+				sleep_before_flush(mdev);
 			flush_blocks_for_bio(mdev, bio, mreq->pos, mreq->len);
+		}
 	} else {
 		if (is_read_error(state)) {
 			mreq->error = -EIO;
@@ -1038,20 +1056,21 @@ static int ioctl_set_reorder(struct mem_dev *mdev, struct crashblk_ctl *ctl)
 
 static int ioctl_get_delay_ms(struct mem_dev *mdev, struct crashblk_ctl *ctl)
 {
-	u32 v[2];
+	u32 v[3];
 	spin_lock(&mdev->delay_lock);
 	v[0] = mdev->min_delay_ms;
 	v[1] = mdev->max_delay_ms;
+	v[2] = mdev->flush_delay_ms;
 	spin_unlock(&mdev->delay_lock);
-	memcpy(&ctl->val_u64, &v[0], sizeof(u64));
+	memcpy(&ctl->data[0], &v[0], sizeof(u32) * 3);
 	return 0;
 }
 
 static int ioctl_set_delay_ms(struct mem_dev *mdev, struct crashblk_ctl *ctl)
 {
-	u32 v[2];
+	u32 v[3];
 
-	memcpy(&v[0], &ctl->val_u64, sizeof(u64));
+	memcpy(&v[0], &ctl->data[0], sizeof(u32) * 3);
 	if (v[0] > v[1]) {
 		LOGe("%u: min/max constraint error %u %u\n"
 			, mdev->index, v[0], v[1]);
@@ -1060,8 +1079,10 @@ static int ioctl_set_delay_ms(struct mem_dev *mdev, struct crashblk_ctl *ctl)
 	spin_lock(&mdev->delay_lock);
 	mdev->min_delay_ms = v[0];
 	mdev->max_delay_ms = v[1];
+	mdev->flush_delay_ms = v[2];
 	spin_unlock(&mdev->delay_lock);
-	LOGi("%u: set delay ms %u %u\n", mdev->index, v[0], v[1]);
+	LOGi("%u: set delay ms min:%u max:%u flush:%u\n"
+		, mdev->index, v[0], v[1], v[2]);
 	return 0;
 }
 
@@ -1223,6 +1244,7 @@ static struct mem_dev *create_mem_dev(void)
 	spin_lock(&mdev->delay_lock);
 	mdev->min_delay_ms = 0; /* default value */
 	mdev->max_delay_ms = 3; /* default value */
+	mdev->flush_delay_ms = 10; /* default value */
 	spin_unlock(&mdev->delay_lock);
 	mdev->index = (u32)(-1);
 

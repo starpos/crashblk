@@ -252,26 +252,28 @@ void doGetDelayMs(const StrVec &params)
     struct crashblk_ctl ctl;
     invokeIoctlWithoutParam(devPath, ctl, CRASHBLK_IOCTL_GET_DELAY_MS);
 
-    uint32_t v[2];
-    ::memcpy(&v[0], &ctl.val_u64, sizeof(uint64_t));
-    std::cout << v[0] << std::endl
-              << v[1] << std::endl;
+    uint32_t v[3];
+    ::memcpy(&v[0], &ctl.data[0], sizeof(uint32_t) * 3);
+    std::cout << "min:" << v[0] << std::endl
+              << "max:" << v[1] << std::endl
+              << "flush:" << v[2] << std::endl;
 }
 
 void doSetDelayMs(const StrVec &params)
 {
     const std::string &devPath = getDevPath(params);
-    if (params.size() < 3) {
-        throw Exception("min_value and max_value must be specified.");
+    if (params.size() < 4) {
+        throw Exception("min/max/flush values must be specified.");
     }
-    uint32_t v[2];
+    uint32_t v[3];
     v[0] = static_cast<uint32_t>(parseSize(params[1])); // min
     v[1] = static_cast<uint32_t>(parseSize(params[2])); // max
+    v[2] = static_cast<uint32_t>(parseSize(params[3])); // flush
 
     struct crashblk_ctl ctl;
     ::memset(&ctl, 0, sizeof(ctl));
     ctl.command = CRASHBLK_IOCTL_SET_DELAY_MS;
-    ::memcpy(&ctl.val_u64, &v[0], sizeof(uint64_t));
+    ::memcpy(&ctl.data[0], &v[0], sizeof(uint32_t) * 3);
     invokeIoctl(devPath, ctl);
 }
 
