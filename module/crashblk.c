@@ -30,6 +30,16 @@
  * Struct definition.
  *******************************************************************************/
 
+struct mem_req
+{
+	struct list_head list;
+	struct bio *bio;
+	uint64_t pos;
+	uint32_t len;
+	uint error;
+	ulong start_time;
+};
+
 struct mem_dev
 {
 	struct list_head list;
@@ -48,7 +58,7 @@ struct mem_dev
 	 * This needs lock to access to.
 	 */
 	spinlock_t ready_lock;
-	struct bio_list ready_bl;
+	struct list_head ready_mreq_list;
 
 	/* For waiting (delayed) tasks. */
 	struct workqueue_struct *wq_wait;
@@ -91,7 +101,7 @@ struct pack_work
 {
 	struct delayed_work dwork;
 	struct mem_dev *mdev;
-	struct bio_list bl;
+	struct list_head mreq_list;
 };
 
 /*******************************************************************************
@@ -129,7 +139,54 @@ module_param_named(is_put_log, is_put_log_, int, S_IRUGO | S_IWUSR);
  * Utilities
  */
 
-static inline struct pack_work* create_pack_work(struct mem_dev *mdev, struct bio_list *bl)
+static inline struct mem_req* create_mem_req(struct bio *bio)
+{
+	struct mem_req *mreq;
+
+retry:
+	mreq = kmalloc(sizeof(struct mem_req), GFP_NOIO);
+	if (!mreq) {
+		schedule();
+		goto retry;
+	}
+
+	INIT_LIST_HEAD(&mreq->list);
+	mreq->bio = bio;
+	mreq->pos = bio->bi_sector;
+	mreq->len = bio_sectors(bio);
+	mreq->error = 0;
+	mreq->start_time = 0;
+	return mreq;
+}
+
+static inline void destroy_mem_req(struct mem_req *mreq)
+{
+	ASSERT(mreq);
+	kfree(mreq);
+}
+
+#if 1
+static void log_mreq(struct mem_req *mreq, const char *action)
+{
+	LOGi("bio %s %" PRIu64 " %u %s%s%s%s%s%s%s\n"
+		, action, mreq->pos, mreq->len
+		, (mreq->bio->bi_rw & REQ_FLUSH) ? "F" : ""
+		, (mreq->bio->bi_rw & REQ_DISCARD) ? "D" : ""
+		, (mreq->bio->bi_rw & REQ_WRITE) ? "W" : "R"
+		, (mreq->bio->bi_rw & REQ_FUA) ? "F" : ""
+		, (mreq->bio->bi_rw & REQ_RAHEAD) ? "A" : ""
+		, (mreq->bio->bi_rw & REQ_SYNC) ? "S" : ""
+		, (mreq->bio->bi_rw & REQ_META) ? "M" : "");
+}
+#else
+static void log_mreq(struct mem_req *, const char *)
+{
+	/* Do nothing */
+}
+#endif
+
+static inline struct pack_work* create_pack_work(
+	struct mem_dev *mdev, struct list_head *mreq_list)
 {
 	struct pack_work *pwork;
 retry:
@@ -139,16 +196,16 @@ retry:
 		goto retry;
 	}
 	pwork->mdev = mdev;
-	bio_list_init(&pwork->bl);
-	bio_list_merge(&pwork->bl, bl);
-	bio_list_init(bl);
+	INIT_LIST_HEAD(&pwork->mreq_list);
+	list_splice_tail_init(mreq_list, &pwork->mreq_list);
+	ASSERT(list_empty(mreq_list));
 	return pwork;
 }
 
 static inline void destroy_pack_work(struct pack_work *pwork)
 {
 	ASSERT(pwork);
-	ASSERT(bio_list_empty(&pwork->bl));
+	ASSERT(list_empty(&pwork->mreq_list));
 	kfree(pwork);
 }
 
@@ -165,6 +222,36 @@ static inline struct pack_work* get_pack_work_from_work(struct work_struct *work
 	struct delayed_work *dwork = container_of(work, struct delayed_work, work);
 	struct pack_work *pwork = container_of(dwork, struct pack_work, dwork);
 	return pwork;
+}
+
+static void io_acct_start(struct gendisk *gd, struct mem_req *mreq)
+{
+	int cpu;
+	const int rw = bio_data_dir(mreq->bio);
+	struct hd_struct *part0 = &gd->part0;
+
+	mreq->start_time = jiffies;
+
+	cpu = part_stat_lock();
+	part_round_stats(cpu, part0);
+	part_stat_inc(cpu, part0, ios[rw]);
+	part_stat_add(cpu, part0, sectors[rw], mreq->len);
+	part_inc_in_flight(part0, rw);
+	part_stat_unlock();
+}
+
+static void io_acct_end(struct gendisk *gd, struct mem_req *mreq)
+{
+	int cpu;
+	int rw = bio_data_dir(mreq->bio);
+	struct hd_struct *part0 = &gd->part0;
+	ulong duration = jiffies - mreq->start_time;
+
+	cpu = part_stat_lock();
+	part_round_stats(cpu, part0);
+	part_stat_add(cpu, part0, ticks[rw], duration);
+	part_dec_in_flight(part0, rw);
+	part_stat_unlock();
 }
 
 static void log_info_bio(u32 device_index, const char *type, const struct bio *bio)
@@ -647,25 +734,18 @@ static void exec_write_bio(struct mem_dev *mdev, struct bio *bio)
 	exec_bio_detail(mdev, bio, true);
 }
 
-static void backup_bio_pos_and_len(struct bio *bio, sector_t *posp, uint *lenp)
-{
-	*posp = bio->bi_sector;
-	*lenp = bio_sectors(bio);
-}
-
 /**
  * Thread-unsafe.
  */
-static void process_bio(struct mem_dev *mdev, struct bio *bio)
+static void process_bio(struct mem_dev *mdev, struct mem_req *mreq)
 {
 	const int state = atomic_read(&mdev->state);
-	int err = 0;
+	struct bio *bio = mreq->bio;
+	mreq->error = 0;
 
 	if (bio->bi_rw & REQ_WRITE) {
-		sector_t pos;
-		uint len;
 		if (is_write_error(state)) {
-			err = -EIO;
+			mreq->error = -EIO;
 			goto fin;
 		}
 		if (bio->bi_rw & REQ_FLUSH) {
@@ -674,7 +754,6 @@ static void process_bio(struct mem_dev *mdev, struct bio *bio)
 			if (bio_sectors(bio) == 0)
 				goto fin;
 		}
-		backup_bio_pos_and_len(bio, &pos, &len);
 		if (bio->bi_rw & REQ_DISCARD) {
 			log_info_bio(mdev->index, "discard", bio);
 			discard_bio(mdev, bio);
@@ -683,104 +762,22 @@ static void process_bio(struct mem_dev *mdev, struct bio *bio)
 			exec_write_bio(mdev, bio);
 		}
 		if (bio->bi_rw & REQ_FUA)
-			flush_blocks_for_bio(mdev, bio, pos, len);
+			flush_blocks_for_bio(mdev, bio, mreq->pos, mreq->len);
 	} else {
 		if (is_read_error(state)) {
-			err = -EIO;
+			mreq->error = -EIO;
 			goto fin;
 		}
 		log_info_bio(mdev->index, "read", bio);
 		exec_read_bio(mdev, bio);
 	}
 fin:
-	/*
-	 * If BIO_UPTODATE flag is set, err is 0.
-	 * otherwise, err is -EIO.
-	 */
-	if (err)
+	if (mreq->error)
 		clear_bit(BIO_UPTODATE, &bio->bi_flags);
 	else
 		set_bit(BIO_UPTODATE, &bio->bi_flags);
-}
 
-static void bio_list_insert_randomly(struct bio_list *bl, struct bio *bio, size_t nr)
-{
-	size_t idx, i;
-	struct bio *bio1;
-
-	if (!bl->tail || nr == 0) {
-		bio_list_add(bl, bio);
-		return;
-	}
-
-	/* Decide position randomly. */
-	get_random_bytes(&idx, sizeof(idx));
-	idx %= nr;
-
-	/* Get the insert position. */
-	bio1 = bl->head;
-	for (i = 0; i < idx; i++) {
-		if (!bio1->bi_next)
-			break;
-		bio1 = bio1->bi_next;
-	}
-
-	/* If reached end */
-	if (!bio1->bi_next) {
-		bio_list_add(bl, bio);
-		return;
-	}
-
-	/* Insert bio to the position */
-	ASSERT(bio1 != bl->tail);
-	bio->bi_next = NULL;
-	bio->bi_next = bio1->bi_next;
-	bio1->bi_next = bio;
-}
-
-/**
- * Reorder bio list randomly.
- * Any IOs can not get over flush requests.
- */
-static void reorder_bio_list(struct bio_list *bl)
-{
-	struct bio_list bl0, bl1;
-	struct bio *bio;
-	size_t nr = 0;
-#ifdef DEBUG
-	const size_t size = bio_list_size(bl);
-	size_t nr_flush = 0;
-#endif
-	bio_list_init(&bl0);
-	bio_list_init(&bl1);
-
-	while ((bio = bio_list_pop(bl))) {
-		if (bio->bi_rw & REQ_FLUSH) {
-			bio_list_merge(&bl1, &bl0);
-			bio_list_init(&bl0);
-			bio_list_add(&bl1, bio);
-			nr = 0;
-#ifdef DEBUG
-			nr_flush++;
-#endif
-		} else {
-			bio_list_insert_randomly(&bl0, bio, nr);
-			nr++;
-		}
-	}
-	bio_list_merge(&bl1, &bl0);
-	bio_list_init(&bl0);
-#ifdef DEBUG
-	ASSERT(size == bio_list_size(&bl1));
-	if (size > 1 || nr_flush > 0)
-		LOG_("reorder size > 0: %zu %zu\n", size, nr_flush);
-#endif
-
-	bio_list_merge(bl, &bl1);
-	bio_list_init(&bl1);
-#ifdef DEBUG
-	ASSERT(size == bio_list_size(bl));
-#endif
+	/* bio_endio() call is deferred. */
 }
 
 /*
@@ -791,14 +788,14 @@ static void run_delay2_task(struct work_struct *ws)
 {
 	struct pack_work *pwork = get_pack_work_from_work(ws);
 	struct mem_dev *mdev = pwork->mdev;
-	struct bio *bio;
+	struct mem_req *mreq, *mreq_next;
 
-	if (atomic_read(&mdev->does_reorder_io))
-		reorder_bio_list(&pwork->bl);
-
-	while ((bio = bio_list_pop(&pwork->bl))) {
-		int err = test_bit(BIO_UPTODATE, &bio->bi_flags) ? 0 : -EIO;
-		bio_endio(bio, err);
+	list_for_each_entry_safe(mreq, mreq_next, &mdev->ready_mreq_list, list) {
+		list_del(&mreq->list);
+		log_mreq(mreq, "end  ");
+		io_acct_end(mdev->disk, mreq);
+		bio_endio(mreq->bio, mreq->error);
+		destroy_mem_req(mreq);
 		atomic_dec(&mdev->nr_running);
 	}
 	destroy_pack_work(pwork);
@@ -823,13 +820,13 @@ static inline uint get_random_delay(struct mem_dev *mdev)
 	return delay;
 }
 
-static inline void invoke_delay2_task(struct mem_dev *mdev, struct bio_list *bl)
+static inline void invoke_delay2_task(struct mem_dev *mdev, struct list_head *mreq_list)
 {
 	struct pack_work *pwork;
 	uint delay_ms;
 
-	ASSERT(!bio_list_empty(bl));
-	pwork = create_pack_work(mdev, bl);
+	ASSERT(!list_empty(mreq_list));
+	pwork = create_pack_work(mdev, mreq_list);
 	ASSERT(pwork);
 
 	delay_ms = get_random_delay(mdev) / 2; /* 2 is magic number... */
@@ -842,29 +839,23 @@ static inline void invoke_delay2_task(struct mem_dev *mdev, struct bio_list *bl)
 static void run_bio_task(struct work_struct *ws)
 {
 	struct mem_dev *mdev = container_of(ws, struct mem_dev, bio_task);
-	struct bio_list bl0, bl1;
-	struct bio *bio;
+	struct list_head mreq_list;
+	struct mem_req *mreq;
 
-	bio_list_init(&bl0);
+	INIT_LIST_HEAD(&mreq_list);
 
 	spin_lock(&mdev->ready_lock);
-	bio_list_merge(&bl0, &mdev->ready_bl);
-	bio_list_init(&mdev->ready_bl);
+	list_splice_tail_init(&mdev->ready_mreq_list, &mreq_list);
+	ASSERT(list_empty(&mdev->ready_mreq_list));
 	spin_unlock(&mdev->ready_lock);
 
-	if (bio_list_empty(&bl0))
+	if (list_empty(&mreq_list))
 		return;
 
-	if (atomic_read(&mdev->does_reorder_io))
-		reorder_bio_list(&bl0);
+	list_for_each_entry(mreq, &mreq_list, list)
+		process_bio(mdev, mreq);
 
-	bio_list_init(&bl1);
-	while ((bio = bio_list_pop(&bl0))) {
-		process_bio(mdev, bio);
-		bio_list_add(&bl1, bio);
-	}
-
-	invoke_delay2_task(mdev, &bl1);
+	invoke_delay2_task(mdev, &mreq_list);
 }
 
 /**
@@ -895,24 +886,24 @@ static void run_delay1_task(struct work_struct *ws)
 	struct mem_dev *mdev = pwork->mdev;
 
 	spin_lock(&mdev->ready_lock);
-	bio_list_merge(&mdev->ready_bl, &pwork->bl);
-	bio_list_init(&pwork->bl);
+	list_splice_tail_init(&pwork->mreq_list, &mdev->ready_mreq_list);
+	ASSERT(list_empty(&pwork->mreq_list));
 	spin_unlock(&mdev->ready_lock);
 
 	invoke_bio_task(mdev);
 	destroy_pack_work(pwork);
 }
 
-static inline void invoke_delay1_task(struct mem_dev *mdev, struct bio *bio)
+static inline void invoke_delay1_task(struct mem_dev *mdev, struct mem_req *mreq)
 {
-	struct bio_list bl;
+	struct list_head mreq_list;
 	struct pack_work *pwork;
 	uint delay_ms;
 
-	bio_list_init(&bl);
-	bio_list_add(&bl, bio);
+	INIT_LIST_HEAD(&mreq_list);
+	list_add(&mreq->list, &mreq_list);
 
-	pwork = create_pack_work(mdev, &bl);
+	pwork = create_pack_work(mdev, &mreq_list);
 	ASSERT(pwork);
 
 	delay_ms = get_random_delay(mdev);
@@ -922,8 +913,13 @@ static inline void invoke_delay1_task(struct mem_dev *mdev, struct bio *bio)
 static void crashblk_make_request(struct request_queue *q, struct bio *bio)
 {
 	struct mem_dev *mdev = q->queuedata;
+	struct mem_req *mreq;
+
 	atomic_inc(&mdev->nr_running);
-	invoke_delay1_task(mdev, bio);
+	mreq = create_mem_req(bio);
+	io_acct_start(mdev->disk, mreq);
+	log_mreq(mreq, "start");
+	invoke_delay1_task(mdev, mreq);
 }
 
 /*
@@ -1215,7 +1211,7 @@ static struct mem_dev *create_mem_dev(void)
 	}
 
 	spin_lock_init(&mdev->ready_lock);
-	bio_list_init(&mdev->ready_bl);
+	INIT_LIST_HEAD(&mdev->ready_mreq_list);
 	atomic_set(&mdev->nr_running, 0);
 	atomic_set(&mdev->state, 0);
 	spin_lock_init(&mdev->delay_lock);
@@ -1262,7 +1258,7 @@ static void del_dev(struct mem_dev *mdev)
 	flush_workqueue(mdev->wq_ordered);
 	flush_workqueue(mdev->wq_wait); /* completion tasks. */
 
-	ASSERT(bio_list_empty(&mdev->bl));
+	ASSERT(list_empty(&mdev->ready_mreq_list));
 	nr_running = atomic_read(&mdev->nr_running);
 	LOGi("%u: nr_running: %d\n", mdev->index, nr_running);
 	ASSERT(nr_running == 0);
@@ -1321,7 +1317,7 @@ static bool add_dev(u64 size_lb, u32 *minorp)
 	}
 
 	atomic_set(&mdev->lost_pct_in_crash, 100);
-	atomic_set(&mdev->does_reorder_io, 0);
+	atomic_set(&mdev->does_reorder_io, 1);
 
 	blk_queue_logical_block_size(q, LBS);
 	blk_queue_physical_block_size(q, LBS);
