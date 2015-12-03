@@ -17,6 +17,7 @@
 #include <linux/spinlock.h>
 #include <linux/idr.h>
 #include <linux/random.h>
+#include <linux/hdreg.h>
 
 #include "common.h"
 #include "block_size.h"
@@ -1143,6 +1144,14 @@ static void mem_dev_release(struct gendisk *gd, fmode_t mode)
 	/* do nothing */
 }
 
+void set_geometry(struct hd_geometry *geo, u64 n_sectors)
+{
+	geo->heads = 4;
+	geo->sectors = 16;
+	geo->cylinders = n_sectors >> 6;
+	geo->start = 0;
+}
+
 static int mem_dev_ioctl(struct block_device *bdev, fmode_t mode,
 			unsigned int cmd, unsigned long arg)
 {
@@ -1151,6 +1160,13 @@ static int mem_dev_ioctl(struct block_device *bdev, fmode_t mode,
 	struct crashblk_ctl __user *user = (struct crashblk_ctl __user *)arg;
 	struct mem_dev *mdev = bdev->bd_disk->private_data;
 
+	if (cmd == HDIO_GETGEO) {
+		struct hd_geometry geo;
+		set_geometry(&geo, get_capacity(mdev->disk));
+		if (copy_to_user((void __user *)arg, &geo, sizeof(geo)))
+			return -EFAULT;
+		return 0;
+	}
 	if (cmd != CRASHBLK_IOCTL)
 		return -EFAULT;
 
