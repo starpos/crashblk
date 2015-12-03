@@ -165,9 +165,11 @@ static inline void destroy_mem_req(struct mem_req *mreq)
 	kfree(mreq);
 }
 
-#if 1
 static void log_mreq(struct mem_req *mreq, const char *action)
 {
+	if (!is_put_log_)
+		return;
+
 	LOGi("bio %s %" PRIu64 " %u %s%s%s%s%s%s%s\n"
 		, action, mreq->pos, mreq->len
 		, (mreq->bio->bi_rw & REQ_FLUSH) ? "F" : ""
@@ -178,12 +180,6 @@ static void log_mreq(struct mem_req *mreq, const char *action)
 		, (mreq->bio->bi_rw & REQ_SYNC) ? "S" : ""
 		, (mreq->bio->bi_rw & REQ_META) ? "M" : "");
 }
-#else
-static void log_mreq(struct mem_req *, const char *)
-{
-	/* Do nothing */
-}
-#endif
 
 static inline struct pack_work* create_pack_work(
 	struct mem_dev *mdev, struct list_head *mreq_list)
@@ -252,15 +248,6 @@ static void io_acct_end(struct gendisk *gd, struct mem_req *mreq)
 	part_stat_add(cpu, part0, ticks[rw], duration);
 	part_dec_in_flight(part0, rw);
 	part_stat_unlock();
-}
-
-static void log_info_bio(u32 device_index, const char *type, const struct bio *bio)
-{
-	if (!is_put_log_)
-		return;
-
-	LOGi("%u: %s %" PRIu64 " %u\n", device_index, type
-			, (u64)bio->bi_sector, bio_sectors(bio));
 }
 
 static struct page *alloc_page_retry_forever(void)
@@ -743,22 +730,20 @@ static void process_bio(struct mem_dev *mdev, struct mem_req *mreq)
 	struct bio *bio = mreq->bio;
 	mreq->error = 0;
 
+	log_mreq(mreq, "exec ");
 	if (bio->bi_rw & REQ_WRITE) {
 		if (is_write_error(state)) {
 			mreq->error = -EIO;
 			goto fin;
 		}
 		if (bio->bi_rw & REQ_FLUSH) {
-			log_info_bio(mdev->index, "flush", bio);
 			flush_all_blocks(mdev);
 			if (bio_sectors(bio) == 0)
 				goto fin;
 		}
 		if (bio->bi_rw & REQ_DISCARD) {
-			log_info_bio(mdev->index, "discard", bio);
 			discard_bio(mdev, bio);
 		} else {
-			log_info_bio(mdev->index, "write", bio);
 			exec_write_bio(mdev, bio);
 		}
 		if (bio->bi_rw & REQ_FUA)
@@ -768,7 +753,6 @@ static void process_bio(struct mem_dev *mdev, struct mem_req *mreq)
 			mreq->error = -EIO;
 			goto fin;
 		}
-		log_info_bio(mdev->index, "read", bio);
 		exec_read_bio(mdev, bio);
 	}
 fin:
@@ -790,7 +774,7 @@ static void run_delay2_task(struct work_struct *ws)
 	struct mem_dev *mdev = pwork->mdev;
 	struct mem_req *mreq, *mreq_next;
 
-	list_for_each_entry_safe(mreq, mreq_next, &mdev->ready_mreq_list, list) {
+	list_for_each_entry_safe(mreq, mreq_next, &pwork->mreq_list, list) {
 		list_del(&mreq->list);
 		log_mreq(mreq, "end  ");
 		io_acct_end(mdev->disk, mreq);
