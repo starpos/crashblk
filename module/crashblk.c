@@ -1038,8 +1038,10 @@ static int ioctl_set_reorder(struct mem_dev *mdev, struct crashblk_ctl *ctl)
 static int ioctl_get_delay_ms(struct mem_dev *mdev, struct crashblk_ctl *ctl)
 {
 	u32 v[2];
+	spin_lock(&mdev->delay_lock);
 	v[0] = mdev->min_delay_ms;
 	v[1] = mdev->max_delay_ms;
+	spin_unlock(&mdev->delay_lock);
 	memcpy(&ctl->val_u64, &v[0], sizeof(u64));
 	return 0;
 }
@@ -1054,8 +1056,11 @@ static int ioctl_set_delay_ms(struct mem_dev *mdev, struct crashblk_ctl *ctl)
 			, mdev->index, v[0], v[1]);
 		return -EFAULT;
 	}
+	spin_lock(&mdev->delay_lock);
 	mdev->min_delay_ms = v[0];
 	mdev->max_delay_ms = v[1];
+	spin_unlock(&mdev->delay_lock);
+	LOGi("%u: set delay ms %u %u\n", mdev->index, v[0], v[1]);
 	return 0;
 }
 
