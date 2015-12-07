@@ -125,12 +125,10 @@ void doDelete(const StrVec &params)
     invokeIoctlWithoutParam(devPath, ctl, CRASHBLK_IOCTL_STOP_DEV);
 }
 
-void doNumDev(const StrVec &params)
+void doNumDev(const StrVec &)
 {
-    const std::string &devPath = getDevPath(params);
-
     struct crashblk_ctl ctl;
-    invokeIoctlWithoutParam(devPath, ctl, CRASHBLK_IOCTL_NUM_OF_DEV);
+    invokeIoctlWithoutParam(ctlPath, ctl, CRASHBLK_IOCTL_NUM_OF_DEV);
     std::cout << ctl.val_int << std::endl; // number of devices.
 }
 
