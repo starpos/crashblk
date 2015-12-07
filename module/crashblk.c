@@ -91,13 +91,17 @@ struct mem_dev
 	atomic_t does_reorder_io;
 
 	/*
-	 * min/max delay [ms].
-	 * Of course min_delay_ms must be <= max_delay_ms.
+	 * min/max delay for read/write/flush [ms].
+	 * Of course min value must be <= max value.
+	 * delay_ms[0] read min
+	 * delay_ms[1] read max
+	 * delay_ms[2] write min
+	 * delay_ms[3] write max
+	 * delay_ms[4] flush min
+	 * delay_ms[5] flush max
 	 */
 	spinlock_t delay_lock;
-	u32 min_delay_ms;
-	u32 max_delay_ms;
-	u32 flush_delay_ms;
+	u32 delay_ms[6];
 };
 
 struct pack_work
@@ -141,6 +145,19 @@ module_param_named(is_put_log, is_put_log_, int, S_IRUGO | S_IWUSR);
 /*
  * Utilities
  */
+
+enum { DELAY_READ = 0, DELAY_WRITE = 1, DELAY_FLUSH = 2, DELAY_MODE_MAX = 3 };
+
+static inline u32* get_delay_ms_ptr(u32 *delay_ms, int mode, int is_max)
+{
+	const size_t i = mode * 2 + is_max;
+
+	ASSERT(mode < DELAY_MODE_MAX);
+	ASSERT(is_max == 0 || is_max == 1);
+	ASSERT(i < 6);
+
+	return &delay_ms[i];
+}
 
 static inline struct mem_req* create_mem_req(struct bio *bio)
 {
@@ -210,7 +227,7 @@ static inline void destroy_pack_work(struct pack_work *pwork)
 
 static inline void queue_pack_work_task(
 	struct workqueue_struct *wq, struct pack_work *pwork,
-	void (*task)(struct work_struct *), uint delay_ms)
+	void (*task)(struct work_struct *), u32 delay_ms)
 {
 	INIT_DELAYED_WORK(&pwork->dwork, task);
 	queue_delayed_work(wq, &pwork->dwork, msecs_to_jiffies(delay_ms));
@@ -724,18 +741,6 @@ static void exec_write_bio(struct mem_dev *mdev, struct bio *bio)
 	exec_bio_detail(mdev, bio, true);
 }
 
-static void sleep_before_flush(struct mem_dev *mdev)
-{
-	u32 flush_delay_ms;
-
-	spin_lock(&mdev->delay_lock);
-	flush_delay_ms = mdev->flush_delay_ms;
-	spin_unlock(&mdev->delay_lock);
-
-	if (flush_delay_ms > 0)
-		msleep(flush_delay_ms);
-}
-
 /**
  * Thread-unsafe.
  */
@@ -752,7 +757,6 @@ static void process_bio(struct mem_dev *mdev, struct mem_req *mreq)
 			goto fin;
 		}
 		if (bio->bi_rw & REQ_FLUSH) {
-			sleep_before_flush(mdev);
 			flush_all_blocks(mdev);
 			if (bio_sectors(bio) == 0)
 				goto fin;
@@ -763,8 +767,6 @@ static void process_bio(struct mem_dev *mdev, struct mem_req *mreq)
 			exec_write_bio(mdev, bio);
 		}
 		if (bio->bi_rw & REQ_FUA) {
-			if (!(bio->bi_rw & REQ_FLUSH))
-				sleep_before_flush(mdev);
 			flush_blocks_for_bio(mdev, bio, mreq->pos, mreq->len);
 		}
 	} else {
@@ -804,18 +806,25 @@ static void run_delay2_task(struct work_struct *ws)
 	destroy_pack_work(pwork);
 }
 
-static inline uint get_random_delay(struct mem_dev *mdev)
+static inline u32 get_random_delay(struct mem_dev *mdev, struct mem_req *mreq)
 {
-	uint32_t diff, min_delay;
-	uint delay;
+	u32 diff, min_delay, delay;
+	int mode;
 
 	spin_lock(&mdev->delay_lock);
-	min_delay = mdev->min_delay_ms;
-	diff = mdev->max_delay_ms - mdev->min_delay_ms;
+	if ((mreq->bio->bi_rw & REQ_FLUSH) || (mreq->bio->bi_rw & REQ_FUA)) {
+		mode = DELAY_FLUSH;
+	} else if (mreq->bio->bi_rw & REQ_WRITE) {
+		mode = DELAY_WRITE;
+	} else {
+		mode = DELAY_READ;
+	}
+	min_delay = *get_delay_ms_ptr(mdev->delay_ms, mode, 0);
+	diff = *get_delay_ms_ptr(mdev->delay_ms, mode, 1) - min_delay;
 	spin_unlock(&mdev->delay_lock);
 
 	if (diff == 0)
-		return (uint)min_delay;
+		return min_delay;
 
 	get_random_bytes(&delay, sizeof(delay));
 	delay %= diff;
@@ -832,7 +841,7 @@ static inline void invoke_delay2_task(struct mem_dev *mdev, struct list_head *mr
 	pwork = create_pack_work(mdev, mreq_list);
 	ASSERT(pwork);
 
-	delay_ms = get_random_delay(mdev) / 2; /* 2 is magic number... */
+	delay_ms = 0; /* currently delay is zero. */
 	queue_pack_work_task(mdev->wq_wait, pwork, run_delay2_task, delay_ms);
 }
 
@@ -901,7 +910,7 @@ static inline void invoke_delay1_task(struct mem_dev *mdev, struct mem_req *mreq
 {
 	struct list_head mreq_list;
 	struct pack_work *pwork;
-	uint delay_ms;
+	u32 delay_ms;
 
 	INIT_LIST_HEAD(&mreq_list);
 	list_add(&mreq->list, &mreq_list);
@@ -909,7 +918,7 @@ static inline void invoke_delay1_task(struct mem_dev *mdev, struct mem_req *mreq
 	pwork = create_pack_work(mdev, &mreq_list);
 	ASSERT(pwork);
 
-	delay_ms = get_random_delay(mdev);
+	delay_ms = get_random_delay(mdev, mreq);
 	queue_pack_work_task(mdev->wq_wait, pwork, run_delay1_task, delay_ms);
 }
 
@@ -1056,33 +1065,40 @@ static int ioctl_set_reorder(struct mem_dev *mdev, struct crashblk_ctl *ctl)
 
 static int ioctl_get_delay_ms(struct mem_dev *mdev, struct crashblk_ctl *ctl)
 {
-	u32 v[3];
 	spin_lock(&mdev->delay_lock);
-	v[0] = mdev->min_delay_ms;
-	v[1] = mdev->max_delay_ms;
-	v[2] = mdev->flush_delay_ms;
+	memcpy(&ctl->data[0], &mdev->delay_ms[0], sizeof(u32) * 6);
 	spin_unlock(&mdev->delay_lock);
-	memcpy(&ctl->data[0], &v[0], sizeof(u32) * 3);
 	return 0;
 }
 
+
 static int ioctl_set_delay_ms(struct mem_dev *mdev, struct crashblk_ctl *ctl)
 {
-	u32 v[3];
+	u32 v[6];
+	const char *DELAY_MODE_STR[] = {"read", "write", "flush"};
+        int mode;
 
-	memcpy(&v[0], &ctl->data[0], sizeof(u32) * 3);
-	if (v[0] > v[1]) {
-		LOGe("%u: min/max constraint error %u %u\n"
-			, mdev->index, v[0], v[1]);
-		return -EFAULT;
+	memcpy(&v[0], &ctl->data[0], sizeof(u32) * 6);
+	for (mode = 0; mode < DELAY_MODE_MAX; mode++) {
+		const u32 *minp = get_delay_ms_ptr(v, mode, 0);
+		const u32 *maxp = get_delay_ms_ptr(v, mode, 1);
+		if (*minp > *maxp) {
+			LOGe("%u: min/max constraint error for %s delay: %u %u\n"
+				, mdev->index, DELAY_MODE_STR[mode], *minp, *maxp);
+			return -EFAULT;
+		}
 	}
+
 	spin_lock(&mdev->delay_lock);
-	mdev->min_delay_ms = v[0];
-	mdev->max_delay_ms = v[1];
-	mdev->flush_delay_ms = v[2];
+	memcpy(&mdev->delay_ms[0], &v[0], sizeof(u32) * 6);
 	spin_unlock(&mdev->delay_lock);
-	LOGi("%u: set delay ms min:%u max:%u flush:%u\n"
-		, mdev->index, v[0], v[1], v[2]);
+
+	for (mode = 0; mode < DELAY_MODE_MAX; mode++) {
+		const u32 *minp = get_delay_ms_ptr(v, mode, 0);
+		const u32 *maxp = get_delay_ms_ptr(v, mode, 1);
+		LOGi("%u: set delay ms min:%u max:%u for %s\n"
+			, mdev->index, *minp, *maxp, DELAY_MODE_STR[mode]);
+	}
 	return 0;
 }
 
@@ -1242,9 +1258,13 @@ static struct mem_dev *create_mem_dev(void)
 	atomic_set(&mdev->state, 0);
 	spin_lock_init(&mdev->delay_lock);
 	spin_lock(&mdev->delay_lock);
-	mdev->min_delay_ms = 0; /* default value */
-	mdev->max_delay_ms = 3; /* default value */
-	mdev->flush_delay_ms = 10; /* default value */
+        /* default value */
+        *get_delay_ms_ptr(mdev->delay_ms, DELAY_READ, 0) = 0;
+        *get_delay_ms_ptr(mdev->delay_ms, DELAY_READ, 1) = 0;
+        *get_delay_ms_ptr(mdev->delay_ms, DELAY_WRITE, 0) = 0;
+        *get_delay_ms_ptr(mdev->delay_ms, DELAY_WRITE, 1) = 3;
+        *get_delay_ms_ptr(mdev->delay_ms, DELAY_FLUSH, 0) = 10;
+        *get_delay_ms_ptr(mdev->delay_ms, DELAY_FLUSH, 1) = 10;
 	spin_unlock(&mdev->delay_lock);
 	mdev->index = (u32)(-1);
 

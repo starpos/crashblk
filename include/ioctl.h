@@ -156,14 +156,15 @@ enum {
 	 *
 	 * For get:
 	 *   INPUT: None.
-	 *   OUTPUT: ctl->data (first 12 bytes).
+	 *   OUTPUT: ctl->data (first 24 bytes).
 	 * For set:
-	 *   INPUT: ctl->data (first 12 bytes).
+	 *   INPUT: ctl->data (first 24 bytes).
 	 *   OUTPUT: None.
 	 *
-	 * min delay value is stored in the first 32bit.
-	 * max delay value is stored in the next 32bit.
-	 * flush delay value is stored in the last 32bit.
+	 * six 32bit values for
+	 * read_min, read_max,
+	 * write_min, write_max,
+	 * flush_min, flush_max in the order.
 	 *
 	 * RETURN 0 in success, or -EFAULT.
 	 */

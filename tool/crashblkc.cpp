@@ -250,28 +250,33 @@ void doGetDelayMs(const StrVec &params)
     struct crashblk_ctl ctl;
     invokeIoctlWithoutParam(devPath, ctl, CRASHBLK_IOCTL_GET_DELAY_MS);
 
-    uint32_t v[3];
-    ::memcpy(&v[0], &ctl.data[0], sizeof(uint32_t) * 3);
-    std::cout << "min:" << v[0] << std::endl
-              << "max:" << v[1] << std::endl
-              << "flush:" << v[2] << std::endl;
+    uint32_t v[6];
+    ::memcpy(&v[0], &ctl.data[0], sizeof(uint32_t) * 6);
+    const char *prefix[] = {
+        "read_min:", "read_max:",
+        "write_min:", "write_max:",
+        "flush_min:", "flush_max:",
+    };
+    for (size_t i = 0; i < 6; i++) {
+        std::cout << prefix[i] << v[i] << std::endl;
+    }
 }
 
 void doSetDelayMs(const StrVec &params)
 {
     const std::string &devPath = getDevPath(params);
-    if (params.size() < 4) {
-        throw Exception("min/max/flush values must be specified.");
+    if (params.size() < 7) {
+        throw Exception("min/max values for read/write/flush must be specified.");
     }
-    uint32_t v[3];
-    v[0] = static_cast<uint32_t>(parseSize(params[1])); // min
-    v[1] = static_cast<uint32_t>(parseSize(params[2])); // max
-    v[2] = static_cast<uint32_t>(parseSize(params[3])); // flush
+    uint32_t v[6];
+    for (size_t i = 0; i < 6; i++) {
+        v[i] = static_cast<uint32_t>(parseSize(params[i + 1]));
+    }
 
     struct crashblk_ctl ctl;
     ::memset(&ctl, 0, sizeof(ctl));
     ctl.command = CRASHBLK_IOCTL_SET_DELAY_MS;
-    ::memcpy(&ctl.data[0], &v[0], sizeof(uint32_t) * 3);
+    ::memcpy(&ctl.data[0], &v[0], sizeof(uint32_t) * 6);
     invokeIoctl(devPath, ctl);
 }
 
@@ -293,7 +298,7 @@ void dispatch(int argc, char *argv[])
         {"set-lost-pct", doSetLostPct, "DEV PCT (0 to 100)"},
         {"set-reorder", doSetReorder, "DEV VAL (0 or 1)"},
         {"get-delay-ms", doGetDelayMs, "DEV"},
-        {"set-delay-ms", doSetDelayMs, "DEV MIN_VAL MAX_VAL"},
+        {"set-delay-ms", doSetDelayMs, "DEV READ_MIN READ_MAX WRITE_MIN WRITE_MAX FLUSH_MIN FLUSH_MAX"},
     };
 
     if (argc < 2) {
