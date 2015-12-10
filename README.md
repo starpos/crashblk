@@ -11,7 +11,8 @@ GPLv2 or later.
 
 | Branch   | Kernel version |
 |----------|----------------|
-| master   | 3.14-          |
+| master   | 4.3-           |
+| for-3.14 | 3.14-4.2       |
 | for-3.10 | 3.10-3.13      |
 
 ## Build
