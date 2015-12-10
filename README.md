@@ -86,4 +86,9 @@ Recover a device from crash/io-error state:
 Of course the lost data will not recovered.
 Use this for crash test of file systems or so.
 
+
+## Copyright
+
+(C) 2014 Cybozu Labs, Inc.
+
 -----
