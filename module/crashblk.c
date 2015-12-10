@@ -19,6 +19,7 @@
 #include <linux/random.h>
 #include <linux/hdreg.h>
 #include <linux/delay.h>
+#include <linux/version.h>
 
 #include "common.h"
 #include "block_size.h"
@@ -413,12 +414,21 @@ static inline void print_bio(struct bio *bio)
 		, bio->bi_phys_segments
 		, bio->bi_seg_front_size
 		, bio->bi_seg_back_size
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 2, 0)
 		, atomic_read(&bio->bi_remaining)
+#else
+		, atomic_read(&bio->__bi_remaining)
+#endif
 		, bio->bi_end_io
 		, bio->bi_private
 		, bio->bi_vcnt
 		, bio->bi_max_vecs
-		, atomic_read(&bio->bi_cnt));
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 2, 0)
+		, atomic_read(&bio->bi_cnt)
+#else
+		, atomic_read(&bio->__bi_cnt)
+#endif
+		);
 	print_bvec_iter(&bio->bi_iter, "  cur ");
 
 	bio_for_each_segment(bv, bio, iter) {
