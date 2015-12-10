@@ -39,7 +39,6 @@ struct mem_req
 	struct bio *bio;
 	uint64_t pos;
 	uint32_t len;
-	uint error;
 	ulong start_time;
 };
 
@@ -175,7 +174,6 @@ retry:
 	mreq->bio = bio;
 	mreq->pos = bio->bi_iter.bi_sector;
 	mreq->len = bio_sectors(bio);
-	mreq->error = 0;
 	mreq->start_time = 0;
 	return mreq;
 }
@@ -396,7 +394,8 @@ static inline void print_bio(struct bio *bio)
 	}
 	pr_info("bio %p\n"
 		"  bi_next %p\n"
-		"  bi_flags %lx\n"
+		"  bi_flags %x\n"
+		"  bi_error %d\n"
 		"  bi_rw %lx\n"
 		"  bi_phys_segments %u\n"
 		"  bi_seg_front_size %u\n"
@@ -410,6 +409,7 @@ static inline void print_bio(struct bio *bio)
 		, bio
 		, bio->bi_next
 		, bio->bi_flags
+		, bio->bi_error
 		, bio->bi_rw
 		, bio->bi_phys_segments
 		, bio->bi_seg_front_size
@@ -829,18 +829,18 @@ static void process_bio(struct mem_dev *mdev, struct mem_req *mreq)
 {
 	const int state = atomic_read(&mdev->state);
 	struct bio *bio = mreq->bio;
-	mreq->error = 0;
+	bio->bi_error = 0;
 
 	log_mreq(mreq, "exec ");
 	if (bio->bi_rw & REQ_WRITE) {
 		if (is_write_error(state)) {
-			mreq->error = -EIO;
-			goto fin;
+			bio->bi_error = -EIO;
+			return;
 		}
 		if (bio->bi_rw & REQ_FLUSH) {
 			flush_all_blocks(mdev);
 			if (bio_sectors(bio) == 0)
-				goto fin;
+				return;
 		}
 		if (bio->bi_rw & REQ_DISCARD) {
 			discard_bio(mdev, bio);
@@ -852,17 +852,11 @@ static void process_bio(struct mem_dev *mdev, struct mem_req *mreq)
 		}
 	} else {
 		if (is_read_error(state)) {
-			mreq->error = -EIO;
-			goto fin;
+			bio->bi_error = -EIO;
+			return;
 		}
 		exec_read_bio(mdev, bio);
 	}
-fin:
-	if (mreq->error)
-		clear_bit(BIO_UPTODATE, &bio->bi_flags);
-	else
-		set_bit(BIO_UPTODATE, &bio->bi_flags);
-
 	/* bio_endio() call is deferred. */
 }
 
@@ -880,7 +874,7 @@ static void run_delay2_task(struct work_struct *ws)
 		list_del(&mreq->list);
 		log_mreq(mreq, "end  ");
 		io_acct_end(mdev->disk, mreq);
-		bio_endio(mreq->bio, mreq->error);
+		bio_endio(mreq->bio);
 		destroy_mem_req(mreq);
 		atomic_dec(&mdev->nr_running);
 	}
