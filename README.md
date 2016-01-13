@@ -6,7 +6,7 @@ This also support configurable delay for read, write and flush IOs.
 
 ## License
 
-GPLv2 or later.
+GPLv2 or 3.
 
 ## Supported kernel version
 
