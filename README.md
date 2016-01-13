@@ -1,8 +1,8 @@
 # crashblk
 
-This is memory block device driver for IO errors and crash test,
+This is a memory block device driver for IO errors and crash test,
 emulating read/write IO error and device crash (or sudden shutdown).
-This also support configurable delay for read, write and flush IOs.
+This also supports configurable delay for read, write and flush IOs.
 
 ## License
 
