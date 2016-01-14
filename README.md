@@ -4,6 +4,15 @@ This is a memory block device driver for IO errors and crash test,
 emulating read/write IO error and device crash (or sudden shutdown).
 This also supports configurable delay for read, write and flush IOs.
 
+## Features
+
+- Crash emulation.
+    - Sudden crash emulation will delete non-persistent data.
+- IO error emulation.
+    - IO will fail in the error states.
+- Configurable response time of read/write/flush IO.
+    - You can reproduce various performance behavior of storage devices.
+
 ## License
 
 GPLv2 or 3.
@@ -27,6 +36,8 @@ GPLv2 or 3.
 ```
 
 Use `KERNELDIR`, `DEBUG` make options to customize your build.
+See module/Makefile for details.
+
 
 ### Controller
 
@@ -60,6 +71,8 @@ Delete a device:
 > sudo crashblkc delete /dev/crashblk0
 ```
 
+You can create two or more devices.
+
 Make a device in error state:
 ```
 > sudo crashblkc io-error /dev/crashblk0 MODE
@@ -87,6 +100,19 @@ Recover a device from crash/io-error state:
 Of course the lost data will not recovered.
 Use this for crash test of file systems or so.
 
+
+Set response times:
+```
+> sudo crashblkc set-delay-ms /dev/crashblk0 READ_MIN READ_MAX WRITE_MIN WRITE_MAX FLUSH_MIN FLUSH_MAX
+```
+For each kind of IO, read, write, and flush,
+IO response time will be randomly determined between the specified min and max values.
+Set both 0 to disable additional delay.
+
+Get response times:
+```
+> sudo crashblkc get-delay-ms /dev/crashblk0
+```
 
 ## Copyright
 
