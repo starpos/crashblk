@@ -989,7 +989,11 @@ static inline void invoke_delay1_task(struct mem_dev *mdev, struct mem_req *mreq
 	queue_pack_work_task(mdev->wq_wait, pwork, run_delay1_task, delay_ms);
 }
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 4, 0)
 static void crashblk_make_request(struct request_queue *q, struct bio *bio)
+#else
+static blk_qc_t crashblk_make_request(struct request_queue *q, struct bio *bio)
+#endif
 {
 	struct mem_dev *mdev = q->queuedata;
 	struct mem_req *mreq;
@@ -999,6 +1003,10 @@ static void crashblk_make_request(struct request_queue *q, struct bio *bio)
 	io_acct_start(mdev->disk, mreq);
 	log_mreq(mreq, "start");
 	invoke_delay1_task(mdev, mreq);
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 4, 0)
+	return BLK_QC_T_NONE;
+#endif
 }
 
 /*
