@@ -1449,7 +1449,11 @@ static bool add_dev(u64 size_lb, u32 *minorp)
 	q->limits.max_discard_sectors = UINT_MAX;
 	q->limits.discard_zeroes_data = 1;
 	queue_flag_set_unlocked(QUEUE_FLAG_DISCARD, q);
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 7, 0)
 	blk_queue_flush(q, REQ_FLUSH | REQ_FUA);
+#else
+	blk_queue_write_cache(q, true, true);
+#endif
 	blk_queue_flush_queueable(q, true);
 
 	set_capacity(disk, size_lb);
