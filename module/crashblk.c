@@ -1446,7 +1446,7 @@ static bool add_dev(u64 size_lb, u32 *minorp)
 	blk_queue_io_min(q, LBS);
 	blk_queue_io_opt(q, LBS);
 	q->limits.discard_granularity = PAGE_SIZE;
-	q->limits.max_discard_sectors = UINT_MAX;
+	blk_queue_max_discard_sectors(q, UINT_MAX);
 	q->limits.discard_zeroes_data = 1;
 	queue_flag_set_unlocked(QUEUE_FLAG_DISCARD, q);
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4, 7, 0)
